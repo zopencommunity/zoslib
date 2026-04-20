@@ -916,9 +916,13 @@ int __open_ascii(const char *filename, int opts, ...) {
 
 int __open_ds_file(const char *filename, int opts, ...) {
   int fd;
-  va_list ap;
-  va_start(ap, opts);
-  int perms = va_arg(ap, int);
+  int perms = 0;
+  if (opts & O_CREAT) {
+    va_list ap;
+    va_start(ap, opts);
+    perms = va_arg(ap, int);
+    va_end(ap);
+  }
 
   DSIO_LOG_DEBUG("calling __open_ds_file file %s\n", filename);
 #if ZOSLIB_ENABLE_DATASETIO
@@ -934,7 +938,6 @@ int __open_ds_file(const char *filename, int opts, ...) {
     }
     DSIO_LOG_DEBUG("calling open-file fd %d\n", fd);
   }
-  va_end(ap);
   return fd;
 }
 
@@ -1081,11 +1084,11 @@ int __close(int fd) {
 off_t __lseek_ds_file(int fd, off_t offset, int whence) {
 #if ZOSLIB_ENABLE_DATASETIO
   if (IS_DD(fd)) {
-    DSIO_LOG_DEBUG("calling lseek-dataset fd %d offset %d whence %d\n", fd, offset, whence);
+    DSIO_LOG_DEBUG("calling lseek-dataset fd %d offset %lld whence %d\n", fd, (long long)offset, whence);
     return lseek_dataset(fd, offset, whence);
   }
 #endif
-  DSIO_LOG_DEBUG("calling lseek-file fd %d offset %d whence %d\n", fd, offset, whence);
+  DSIO_LOG_DEBUG("calling lseek-file fd %d offset %lld whence %d\n", fd, (long long)offset, whence);
   return __lseek_orig(fd, offset, whence);
 }
 
@@ -1450,8 +1453,8 @@ static ssize_t ebcdic_writev(int fd, const struct iovec *iov, int iovcnt) {
     ptr += iov[i].iov_len;
   }
 
-  // Write the entire converted buffer at once.
-  ssize_t written = __write_orig(fd, converted_buf, total_len);
+  // Write the entire converted buffer at once using the dataset-aware wrapper.
+  ssize_t written = __write_ds_file(fd, converted_buf, total_len);
 
   if (using_heap) {
     free(converted_buf);
@@ -1461,6 +1464,12 @@ static ssize_t ebcdic_writev(int fd, const struct iovec *iov, int iovcnt) {
 }
 
 ssize_t __writev_ascii(int fd, const struct iovec *iov, int iovcnt) {
+#if ZOSLIB_ENABLE_DATASETIO
+  if (IS_DD(fd)) {
+    errno = ENOSYS;
+    return -1;
+  }
+#endif
 
   if (!isatty(fd)) {
     return __writev_orig(fd, iov, iovcnt);
@@ -1496,6 +1505,12 @@ static ssize_t ebcdic_readv(int fd, const struct iovec *iov, int iovcnt) {
 
 
 ssize_t __readv_ascii(int fd, const struct iovec *iov, int iovcnt) {
+#if ZOSLIB_ENABLE_DATASETIO
+   if (IS_DD(fd)) {
+     errno = ENOSYS;
+     return -1;
+   }
+#endif
 
    if (!isatty(fd)) {
      return __readv_orig(fd, iov, iovcnt);

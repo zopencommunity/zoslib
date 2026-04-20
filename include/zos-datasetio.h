@@ -46,8 +46,8 @@ int fstat_dataset(int fd, struct stat *statbuf);
  *
  * Datasets are always in the form: //'<dataset>' or //'<dataset>(<member>)'
  */
-char* temp_file_name(char* result);
-char* temp_dataset_name(char* result);
+char* temp_file_name(char* result, size_t len);
+char* temp_dataset_name(char* result, size_t len);
 int allocate_dataset(const char* dataset);
 int delete_dataset(const char* dataset);
 
@@ -357,7 +357,7 @@ typedef struct DatasetEntry {
 
 
 
-#define GET_DUMMY_FD()   (open("/dev/null", O_WRONLY, 0))
+#define GET_DUMMY_FD(flags) (open("/dev/null", (flags) & (O_RDONLY | O_WRONLY | O_RDWR), 0))
 #define IS_DATASET(name) ((name) && ((name)[0] == '/') && ((name)[1] == '/'))
 
 /* Enable/disable logging - set to 1 to enable log_* calls */
@@ -449,6 +449,7 @@ int extract_qualifiers(const char* name, char* hlq, char* llq, size_t len);
 #define ADD_FD(fd)    ((void)0)
 #define ADD_DD(fd,dd) ((void)0)
 #define GET_DD(fd)    (NULL)
+#define GET_DUMMY_FD(flags) (-1)
 #define CLEAR_DD(fd)  ((void)0)
 #define IS_FD(fd)     (1)
 #define IS_DD(fd)     (0)

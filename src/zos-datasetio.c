@@ -117,7 +117,14 @@ int create_dataset_fd(const char* name, unsigned short file_ccsid, int flags)
     errno = ENOMEM;
     return -1;
   }
-  parse_and_store_name(dentry, name);
+  
+  if (parse_and_store_name(dentry, name) != 0) {
+    fclose(dd);
+    free_entry(dentry);
+    errno = EINVAL;
+    return -1;
+  }
+
   dentry->open_flags = flags;
   dentry->conversion_state = SETCVTON; /* Default to conversion on */
 
@@ -193,13 +200,15 @@ int create_dataset_fd(const char* name, unsigned short file_ccsid, int flags)
     return -1;
   }
 
-  int fd = GET_DUMMY_FD();
-  if (fd < 0) {
-    DSIO_LOG_DEBUG("create_dataset_fd: ERROR - GET_DUMMY_FD failed, errno=%d\n", errno);
-    set_entry_error(dentry, DSIO_ERR_INTERNAL_ERROR, "Failed to allocate file descriptor");
+  int fd = GET_DUMMY_FD(flags);
+  if (fd < 0 || fd >= MAX_FDS) {
+    DSIO_LOG_DEBUG("create_dataset_fd: ERROR - GET_DUMMY_FD failed or fd out of range (fd=%d, max=%d)\n", fd, MAX_FDS);
+    set_entry_error(dentry, DSIO_ERR_INTERNAL_ERROR, "Failed to allocate or track file descriptor");
+    if (fd >= 0) close(fd);
     fclose(dd);
+    if (dentry->rec_buf) free(dentry->rec_buf);
     free(dentry);
-    errno = map_dsio_error_to_errno(DSIO_ERR_INTERNAL_ERROR);
+    errno = (fd >= MAX_FDS) ? EMFILE : map_dsio_error_to_errno(DSIO_ERR_INTERNAL_ERROR);
     return -1;
   }
   DSIO_LOG_DEBUG("create_dataset_fd: Assigned dummy fd %d\n", fd);
@@ -283,11 +292,11 @@ int open_dataset(const char* name, int flags, mode_t mode)
 
 ssize_t write_dataset(int fd, const void* buf, size_t count)
 {
-  void* dd = GET_DD(fd);
-  if (!dd) {
+  if (!IS_DD(fd)) {
     errno = EBADF;
     return -1;
   }
+  void* dd = GET_DD(fd);
 
   DatasetEntry* dentry = (DatasetEntry*) (dd);
   
@@ -342,7 +351,12 @@ ssize_t write_dataset(int fd, const void* buf, size_t count)
         dentry->rec_buf_pos = 0;
         dentry->dirty = 0;
       } else if (!dentry->is_fixed_recfm) {
-        fwrite("", 1, 0, fp);
+        /* 
+         * For variable records, write a record with a single space to represent a blank line,
+         * as fwrite with length 0 is often a no-op on z/OS record I/O.
+         */
+        char space = ' ';
+        fwrite(&space, 1, 1, fp);
       }
       
       pos += to_copy + 1; /* skip the data and the newline */
@@ -387,11 +401,11 @@ ssize_t write_dataset(int fd, const void* buf, size_t count)
 
 ssize_t read_dataset(int fd, void* buf, size_t count)
 {
-  void* dd = GET_DD(fd);
-  if (!dd) {
+  if (!IS_DD(fd)) {
     errno = EBADF;
     return -1;
   }
+  void* dd = GET_DD(fd);
 
   DatasetEntry* dentry = (DatasetEntry*) (dd);
   
@@ -487,13 +501,7 @@ ssize_t read_dataset(int fd, void* buf, size_t count)
         return bytes_copied > 0 ? (ssize_t)bytes_copied : -1;
       }
       dentry->eof_reached = 1;
-      /* Only set newline_pending if we actually read data from this dataset.
-       * Without this guard, an empty dataset would return '\n' instead of 0.
-       */
-      if (bytes_copied > 0) {
-        dentry->newline_pending = 1;
-      }
-      break; /* Will emit newline on next call or return if bytes_copied > 0 */
+      break; /* Will return bytes_copied if > 0, else 0 for EOF */
     }
     
     /* Convert CCSID of the newly read data in-place */
@@ -510,11 +518,11 @@ ssize_t read_dataset(int fd, void* buf, size_t count)
 
 int close_dataset(int fd)
 {
-  void* dd = GET_DD(fd);
-  if (!dd) {
+  if (!IS_DD(fd)) {
     errno = EBADF;
     return -1;
   }
+  void* dd = GET_DD(fd);
 
   DatasetEntry* dentry = (DatasetEntry*) (dd);
   
@@ -575,7 +583,7 @@ int close_dataset(int fd)
   return rc;
 }
 
-char* temp_dataset_name(char* result)
+char* temp_dataset_name(char* result, size_t len)
 {
   char* orig = getenv("__POSIX_TMPNAM");
   char temp[L_tmpnam+1];
@@ -585,11 +593,11 @@ char* temp_dataset_name(char* result)
     setenv("__POSIX_TMPNAM", orig, 1);
   else
     unsetenv("__POSIX_TMPNAM");
-  sprintf(result, "//'%s'", temp);
+  snprintf(result, len, "//'%s'", temp);
   return result;
 }
 
-char* temp_file_name(char* result)
+char* temp_file_name(char* result, size_t len)
 {
   char* orig = getenv("__POSIX_TMPNAM");
   setenv("__POSIX_TMPNAM", "YES", 1);
@@ -683,8 +691,11 @@ int zos_fcntl(int fd, int cmd, struct f_cnvrt* req)
       dentry->file_ccsid = req->fccsid;
       dentry->conversion_state = req->cvtcmd;
     }
+    return 0;
   }
-  return 0;
+  
+  errno = EINVAL;
+  return -1;
 }
 
 
@@ -800,8 +811,12 @@ off_t lseek_dataset(int fd, off_t offset, int whence) {
             size_t need = (size_t)target - dentry->stream_offset;
             size_t chunk = need < sizeof(discard) ? need : sizeof(discard);
             ssize_t n = read_dataset(fd, discard, chunk);
-            if (n <= 0) {
-                /* EOF reached before target */
+            if (n < 0) {
+                /* Read error occurred */
+                return (off_t)-1;
+            } else if (n == 0) {
+                /* EOF reached before target - update offset to target to match standard lseek behavior */
+                dentry->stream_offset = (size_t)target;
                 break;
             }
         }
@@ -914,7 +929,9 @@ int stat_dataset(const char *pathname, struct stat *statbuf) {
     }
     
     int result = fstat_dataset(fd, statbuf);
+    int save_errno = errno;
     close_dataset(fd);
+    if (result != 0) errno = save_errno;
     
     DSIO_LOG_DEBUG("stat_dataset: RETURN %d for %s\n", result, pathname);
     return result;
@@ -1568,8 +1585,11 @@ int dsio_get_metadata(int fd, dsio_metadata_t* metadata) {
     metadata->readonly = entry->readonly;
     
     strncpy(metadata->member_name, entry->member_name, sizeof(metadata->member_name) - 1);
+    metadata->member_name[sizeof(metadata->member_name) - 1] = '\0';
     strncpy(metadata->hlq, entry->hlq, sizeof(metadata->hlq) - 1);
+    metadata->hlq[sizeof(metadata->hlq) - 1] = '\0';
     strncpy(metadata->llq, entry->llq, sizeof(metadata->llq) - 1);
+    metadata->llq[sizeof(metadata->llq) - 1] = '\0';
     
     return 0;
 }
@@ -1768,22 +1788,28 @@ static ssize_t calculate_vb_emulated_size(FILE* fp, DatasetEntry* entry) {
         }
         
         /* Read each record, stripping trailing spaces, counting bytes+newline */
+        /* Read each record */
         while (1) {
             size_t rc = fread(entry->rec_buf, 1, entry->rec_buf_size, fp);
-            if (rc == 0) break;  /* EOF */
-            
-            /* Strip trailing spaces */
-            while (rc > 0 && entry->rec_buf[rc - 1] == ' ') {
-                rc--;
+            if (rc == 0) {
+                if (ferror(fp)) {
+                    set_entry_error(entry, DSIO_ERR_READ_FAILED, "fread() failed in calculate_vb_emulated_size");
+                    fsetpos(fp, &saved_pos);
+                    return -1;
+                }
+                break;  /* EOF */
             }
+
             total_size += rc + 1;  /* +1 for newline */
             rec_count++;
         }
-        
         /* Restore position */
         if (fsetpos(fp, &saved_pos) != 0) {
             DSIO_LOG_DEBUG("calculate_vb_emulated_size: WARNING - failed to restore file position\n");
         }
+        /* Overwrote buffer, so clear any pending read data */
+        entry->rec_buf_len = 0;
+        entry->rec_buf_pos = 0;
     }
     
     DSIO_LOG_DEBUG("calculate_vb_emulated_size: %zu bytes (%zu records)\n", total_size, rec_count);

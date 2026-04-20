@@ -2469,6 +2469,7 @@ bool __zinit::isValidZOSLIBEnvar(std::string envar) {
 }
 
 __zinit::__zinit() {
+  ds_support_mode = DS_SUPPORT_NO;
   __gMainThreadId = gettid();
   __gMainThreadSelf = pthread_self();
 
@@ -3086,9 +3087,7 @@ extern "C" void init_zoslib_config(zoslib_config_t *const config) {
   config->MEMORY_USAGE_LOG_FILE_ENVAR = MEMORY_USAGE_LOG_FILE_ENVAR_DEFAULT;
   config->MEMORY_USAGE_LOG_LEVEL_ENVAR = MEMORY_USAGE_LOG_LEVEL_ENVAR_DEFAULT;
   config->MEMORY_USAGE_LOG_INC_ENVAR = MEMORY_USAGE_LOG_INC_ENVAR_DEFAULT;
-#if ZOSLIB_ENABLE_DATASETIO
   config->DATASET_SUPPORT_ENVAR = DATASET_SUPPORT_ENVAR_DEFAULT;
-#endif
 }
 
 extern "C" void init_zoslib(const zoslib_config_t config) {

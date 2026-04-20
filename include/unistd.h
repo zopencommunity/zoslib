@@ -40,6 +40,8 @@ __Z_EXPORT off_t __lseek_ds_file(int fd, off_t offset, int whence);
 #define write __write_replaced
 #undef read
 #define read __read_replaced
+#undef lseek
+#define lseek __lseek_replaced
 #include_next <unistd.h>
 #undef pipe
 #undef close
@@ -47,6 +49,7 @@ __Z_EXPORT off_t __lseek_ds_file(int fd, off_t offset, int whence);
 #undef readlink
 #undef write
 #undef read
+#undef lseek
 
 #if defined(__cplusplus)
 extern "C" {

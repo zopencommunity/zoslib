@@ -20,6 +20,8 @@
 
 #include "zos-datasetio.h"
 
+extern FILE *__fopen_orig(const char *filename, const char *mode) __asm("@@A00246");
+
 #if ZOSLIB_ENABLE_DATASETIO
 
 /* __close_orig is defined in zos-io.cc as the original close() syscall.
@@ -34,6 +36,7 @@ static dsio_recfm_t detect_recfm_from_fldata(const fldata_t* fdata);
 static int map_dsio_error_to_errno(dsio_error_t dsio_err);
 
 static dsio_dsorg_t detect_dsorg_from_fldata(const fldata_t* fdata);
+static int flush_rec_buf(DatasetEntry* dentry);
 
 static const char DATASET_CHAR[] = "ABCDEFGHIJKLMNOPQRSTUVWYZ$#@";
 
@@ -104,7 +107,7 @@ int create_dataset_fd(const char* name, unsigned short file_ccsid, int flags)
   }
 
   DSIO_LOG_DEBUG("Open with mode %s\n", fopen_mode);
-  FILE* dd = fopen(name, fopen_mode);
+  FILE* dd = __fopen_orig(name, fopen_mode);
   if (!dd) {
     perror("dataset open failed");
     errno = EIO;
@@ -168,7 +171,7 @@ int create_dataset_fd(const char* name, unsigned short file_ccsid, int flags)
       reopen_mode = "rb,recfm=+";
     }
     DSIO_LOG_DEBUG("FB optimization: reopening with mode %s\n", reopen_mode);
-    dd = fopen(name, reopen_mode);
+    dd = __fopen_orig(name, reopen_mode);
     if (!dd) {
       set_entry_error(dentry, DSIO_ERR_OPEN_FAILED, "Failed to reopen dataset in binary mode");
       free(dentry);
@@ -417,27 +420,13 @@ ssize_t read_dataset(int fd, void* buf, size_t count)
    * We bypass C runtime buffering with _IONBF and do our own buffering in rec_buf.
    */
   if (dentry->dirty) {
-    if (dentry->rec_buf_pos > 0) {
-      /* Flush pending write buffer */
-      if (dentry->is_fixed_recfm) {
-        while (dentry->rec_buf_pos < dentry->reclen) {
-          dentry->rec_buf[dentry->rec_buf_pos++] = ' ';
-        }
-      }
-      if (dentry->conversion_state == SETCVTON) {
-        dsio_convert_buffer(dentry->rec_buf, dentry->rec_buf_pos, 
-                            dentry->program_ccsid, dentry->file_ccsid);
-      }
-      if (fwrite(dentry->rec_buf, 1, dentry->rec_buf_pos, fp) != dentry->rec_buf_pos) {
-        set_entry_error(dentry, DSIO_ERR_WRITE_FAILED, "Failed to flush write buffer before read");
-        errno = map_dsio_error_to_errno(DSIO_ERR_WRITE_FAILED);
-        return -1;
-      }
+    if (flush_rec_buf(dentry) != 0) {
+      errno = map_dsio_error_to_errno(DSIO_ERR_WRITE_FAILED);
+      return -1;
     }
-    /* Reset buffer state for switch to read mode */
+    /* Reset read state for switch to read mode */
     dentry->rec_buf_pos = 0;
     dentry->rec_buf_len = 0;
-    dentry->dirty = 0;
   }
 
   DSIO_LOG_DEBUG("read_dataset: fd=%d count=%zu offset=%zu recfm=%s\n",
@@ -532,34 +521,8 @@ int close_dataset(int fd)
   FILE* fp = dentry->file_ptr;
 
   /* Flush any partial record remaining in the write buffer */
-  if (dentry->dirty && dentry->rec_buf_pos > 0 &&
-      ((dentry->open_flags & O_ACCMODE) != O_RDONLY)) {
-    /* For FB datasets, pad final record to reclen with spaces */
-    if (dentry->is_fixed_recfm) {
-      while (dentry->rec_buf_pos < dentry->reclen) {
-        dentry->rec_buf[dentry->rec_buf_pos++] = ' ';
-      }
-    }
-
-    /* Convert CCSID before writing */
-    if (dentry->conversion_state == SETCVTON) {
-      void* conv_result = dsio_convert_buffer(dentry->rec_buf, dentry->rec_buf_pos, 
-                                             dentry->program_ccsid, dentry->file_ccsid);
-      if (conv_result == NULL) {
-        set_entry_error(dentry, DSIO_ERR_CCSID_CONVERSION, "CCSID conversion failed during close");
-        fprintf(stderr, "WARNING: CCSID conversion failed during close\n");
-        /* Continue with close despite conversion error */
-      }
-    }
-
-    /* Write final record */
-    size_t rc = fwrite(dentry->rec_buf, 1, dentry->rec_buf_pos, fp);
-    if (rc != dentry->rec_buf_pos) {
-      set_entry_error(dentry, DSIO_ERR_WRITE_FAILED, "Final record write incomplete during close");
-      fprintf(stderr, "WARNING: Final record write incomplete (%zu of %zu bytes)\n", 
-              rc, dentry->rec_buf_pos);
-      /* Continue with close despite write error */
-    }
+  if (dentry->dirty) {
+    flush_rec_buf(dentry);
   }
 
   int rc = fclose(fp);
@@ -716,6 +679,14 @@ off_t lseek_dataset(int fd, off_t offset, int whence) {
     
     DatasetEntry* dentry = (DatasetEntry*) dd;
     
+    /* Flush any pending writes before seeking */
+    if (dentry->dirty) {
+        if (flush_rec_buf(dentry) != 0) {
+            errno = map_dsio_error_to_errno(DSIO_ERR_WRITE_FAILED);
+            return (off_t)-1;
+        }
+    }
+
     /* Clear any previous errors and EOF state */
     dentry->last_error = DSIO_SUCCESS;
     dentry->eof_reached = 0;
@@ -1492,6 +1463,37 @@ static dsio_dsorg_t detect_dsorg_from_fldata(const fldata_t* fdata) {
     }
     
     return DSIO_DSORG_UNKNOWN;
+}
+
+static int flush_rec_buf(DatasetEntry* dentry) {
+    if (!dentry || !dentry->file_ptr || !dentry->dirty || dentry->rec_buf_pos == 0) {
+        return 0;
+    }
+
+    FILE* fp = dentry->file_ptr;
+
+    /* For FB datasets, pad final record to reclen with spaces */
+    if (dentry->is_fixed_recfm) {
+        while (dentry->rec_buf_pos < dentry->reclen) {
+            dentry->rec_buf[dentry->rec_buf_pos++] = ' ';
+        }
+    }
+
+    /* Convert CCSID before writing */
+    if (dentry->conversion_state == 1 /* SETCVTON */) {
+        dsio_convert_buffer(dentry->rec_buf, dentry->rec_buf_pos, 
+                            dentry->program_ccsid, dentry->file_ccsid);
+    }
+
+    /* Write record */
+    if (fwrite(dentry->rec_buf, 1, dentry->rec_buf_pos, fp) != dentry->rec_buf_pos) {
+        set_entry_error(dentry, DSIO_ERR_WRITE_FAILED, "Failed to flush internal record buffer");
+        return -1;
+    }
+
+    dentry->rec_buf_pos = 0;
+    dentry->dirty = 0;
+    return 0;
 }
 
 DatasetEntry* create_entry(FILE* fp, unsigned short file_ccsid) {

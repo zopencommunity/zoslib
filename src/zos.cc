@@ -2693,13 +2693,12 @@ int __zinit::initialize(const zoslib_config_t &aconfig) {
   memcpy(&config, &aconfig, sizeof(config));
 
 #if ZOSLIB_ENABLE_DATASETIO
+  /* Default to enabled, only disable if explicitly set to NO/0 */
   char* ds_env = getenv(config.DATASET_SUPPORT_ENVAR);
-  if (ds_env && (strcasecmp(ds_env, "YES") == 0 || strcmp(ds_env, "1") == 0)) {
-    ds_support_mode = DS_SUPPORT_YES;
-  } else if (ds_env && (strcasecmp(ds_env, "NO") == 0 || strcmp(ds_env, "0") == 0)) {
+  if (ds_env && (strcasecmp(ds_env, "NO") == 0 || strcmp(ds_env, "0") == 0)) {
     ds_support_mode = DS_SUPPORT_NO;
   } else {
-    ds_support_mode = DS_SUPPORT_NO;
+    ds_support_mode = DS_SUPPORT_YES;
   }
 #else
   ds_support_mode = DS_SUPPORT_NO;

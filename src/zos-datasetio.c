@@ -960,26 +960,11 @@ int g_debug_enabled = 0;
 
 static const char* error_messages[] = {
     [DSIO_SUCCESS] = "Success",
-    [DSIO_ERR_INVALID_NAME] = "Invalid dataset name",
-    [DSIO_ERR_NAME_TOO_LONG] = "Dataset name too long",
-    [DSIO_ERR_OPEN_FAILED] = "Failed to open dataset",
-    [DSIO_ERR_READ_FAILED] = "Failed to read from dataset",
-    [DSIO_ERR_WRITE_FAILED] = "Failed to write to dataset",
-    [DSIO_ERR_CLOSE_FAILED] = "Failed to close dataset",
-    [DSIO_ERR_ALLOC_FAILED] = "Memory allocation failed",
-    [DSIO_ERR_INVALID_FD] = "Invalid file descriptor",
-    [DSIO_ERR_INVALID_RECFM] = "Invalid record format",
-    [DSIO_ERR_INVALID_DSORG] = "Invalid dataset organization",
-    [DSIO_ERR_CCSID_CONVERSION] = "CCSID conversion failed",
-    [DSIO_ERR_BUFFER_OVERFLOW] = "Buffer overflow",
-    [DSIO_ERR_MEMBER_NOT_FOUND] = "Member not found",
-    [DSIO_ERR_NOT_A_DATASET] = "Not a dataset",
-    [DSIO_ERR_FLDATA_FAILED] = "fldata() failed",
-    [DSIO_ERR_FSEEK_FAILED] = "fseek() failed",
-    [DSIO_ERR_FTELL_FAILED] = "ftell() failed",
-    [DSIO_ERR_RECORD_TOO_LONG] = "Record too long",
-    [DSIO_ERR_UNSUPPORTED_OPERATION] = "Unsupported operation",
-    [DSIO_ERR_INTERNAL_ERROR] = "Internal error"
+    [DSIO_ERR_INVALID_PARAM] = "Invalid parameter (name, fd, recfm, dsorg, etc.)",
+    [DSIO_ERR_IO_FAILED] = "I/O operation failed (open, read, write, close, seek, etc.)",
+    [DSIO_ERR_RESOURCE] = "Resource error (allocation, buffer overflow, record too long)",
+    [DSIO_ERR_UNSUPPORTED] = "Unsupported operation or feature",
+    [DSIO_ERR_INTERNAL] = "Internal error"
 };
 
 const char* dsio_strerror(dsio_error_t error) {
@@ -1025,34 +1010,15 @@ static int map_dsio_error_to_errno(dsio_error_t dsio_err) {
     switch (dsio_err) {
         case DSIO_SUCCESS:
             return 0;
-        case DSIO_ERR_INVALID_NAME:
-        case DSIO_ERR_INVALID_RECFM:
-        case DSIO_ERR_INVALID_DSORG:
-        case DSIO_ERR_INVALID_FD:
+        case DSIO_ERR_INVALID_PARAM:
             return EINVAL;
-        case DSIO_ERR_NAME_TOO_LONG:
-            return ENAMETOOLONG;
-        case DSIO_ERR_OPEN_FAILED:
-        case DSIO_ERR_READ_FAILED:
-        case DSIO_ERR_WRITE_FAILED:
-        case DSIO_ERR_CLOSE_FAILED:
-        case DSIO_ERR_FLDATA_FAILED:
-        case DSIO_ERR_FSEEK_FAILED:
-        case DSIO_ERR_FTELL_FAILED:
+        case DSIO_ERR_IO_FAILED:
             return EIO;
-        case DSIO_ERR_ALLOC_FAILED:
+        case DSIO_ERR_RESOURCE:
             return ENOMEM;
-        case DSIO_ERR_MEMBER_NOT_FOUND:
-        case DSIO_ERR_NOT_A_DATASET:
-            return ENOENT;
-        case DSIO_ERR_CCSID_CONVERSION:
-            return EILSEQ;
-        case DSIO_ERR_BUFFER_OVERFLOW:
-        case DSIO_ERR_RECORD_TOO_LONG:
-            return EOVERFLOW;
-        case DSIO_ERR_UNSUPPORTED_OPERATION:
+        case DSIO_ERR_UNSUPPORTED:
             return ENOTSUP;
-        case DSIO_ERR_INTERNAL_ERROR:
+        case DSIO_ERR_INTERNAL:
         default:
             return EIO;
     }
@@ -1328,56 +1294,35 @@ void* convert_ascii_to_ebcdic(void* buf, size_t len) {
  * Adapted from libdio's logging framework
  * ======================================================================== */
 
-void dsio_set_log_level(dsio_log_level_t level) {
-    g_log_level = level;
-}
-
-void dsio_set_log_stream(FILE* stream) {
-    g_log_stream = stream;
-}
+void dsio_set_log_level(dsio_log_level_t level) { g_log_level = level; }
+void dsio_set_log_stream(FILE* stream) { g_log_stream = stream; }
 
 void dsio_enable_debug(int enable) {
     g_debug_enabled = enable;
     if (enable) {
-        if (g_log_level < DSIO_LOG_DEBUG) {
-            g_log_level = DSIO_LOG_DEBUG;
-        }
-        /* Auto-create temp log file if not already set */
+        if (g_log_level < DSIO_LOG_DEBUG) g_log_level = DSIO_LOG_DEBUG;
         if (!g_log_stream) {
             char logpath[256];
             snprintf(logpath, sizeof(logpath), "/tmp/zoslib_dsio_%d.log", getpid());
             g_log_stream = fopen(logpath, "a");
-            if (g_log_stream) {
-                fprintf(stderr, "DSIO: Logging to %s\n", logpath);
-            }
+            if (g_log_stream) fprintf(stderr, "DSIO: Logging to %s\n", logpath);
         }
     }
 }
 
 void dsio_log(dsio_log_level_t level, const char* format, ...) {
-    if (level > g_log_level) {
-        return;
-    }
+    if (!g_debug_enabled || level > g_log_level) return;
+    
+    static const char* levels[] = {"", "ERROR", "WARN ", "INFO ", "DEBUG", "TRACE"};
+    const char* level_str = (level >= 0 && level < 6) ? levels[level] : "?????";
     
     FILE* stream = g_log_stream ? g_log_stream : stderr;
-    
-    const char* level_str;
-    switch (level) {
-        case DSIO_LOG_ERROR: level_str = "ERROR"; break;
-        case DSIO_LOG_WARN:  level_str = "WARN "; break;
-        case DSIO_LOG_INFO:  level_str = "INFO "; break;
-        case DSIO_LOG_DEBUG: level_str = "DEBUG"; break;
-        case DSIO_LOG_TRACE: level_str = "TRACE"; break;
-        default:             level_str = "?????"; break;
-    }
-    
     fprintf(stream, "[%s] ", level_str);
     
     va_list args;
     va_start(args, format);
     vfprintf(stream, format, args);
     va_end(args);
-    
     fflush(stream);
 }
 

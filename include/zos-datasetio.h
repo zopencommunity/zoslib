@@ -55,30 +55,37 @@ int delete_dataset(const char* dataset);
  * ERROR HANDLING
  * ======================================================================== */
 
-/* Comprehensive error codes for better diagnostics */
+/* Simplified error codes grouped by category */
 typedef enum {
     DSIO_SUCCESS = 0,
-    DSIO_ERR_INVALID_NAME,
-    DSIO_ERR_NAME_TOO_LONG,
-    DSIO_ERR_OPEN_FAILED,
-    DSIO_ERR_READ_FAILED,
-    DSIO_ERR_WRITE_FAILED,
-    DSIO_ERR_CLOSE_FAILED,
-    DSIO_ERR_ALLOC_FAILED,
-    DSIO_ERR_INVALID_FD,
-    DSIO_ERR_INVALID_RECFM,
-    DSIO_ERR_INVALID_DSORG,
-    DSIO_ERR_CCSID_CONVERSION,
-    DSIO_ERR_BUFFER_OVERFLOW,
-    DSIO_ERR_MEMBER_NOT_FOUND,
-    DSIO_ERR_NOT_A_DATASET,
-    DSIO_ERR_FLDATA_FAILED,
-    DSIO_ERR_FSEEK_FAILED,
-    DSIO_ERR_FTELL_FAILED,
-    DSIO_ERR_RECORD_TOO_LONG,
-    DSIO_ERR_UNSUPPORTED_OPERATION,
-    DSIO_ERR_INTERNAL_ERROR
+    DSIO_ERR_INVALID_PARAM,    /* Invalid name, fd, recfm, dsorg, name too long */
+    DSIO_ERR_IO_FAILED,        /* Open, read, write, close, seek, tell failures */
+    DSIO_ERR_RESOURCE,         /* Allocation failed, buffer overflow, record too long */
+    DSIO_ERR_UNSUPPORTED,      /* Unsupported operations, CCSID conversion not implemented */
+    DSIO_ERR_INTERNAL          /* Internal errors, unexpected conditions */
 } dsio_error_t;
+
+/* Legacy error code aliases for backward compatibility */
+#define DSIO_ERR_INVALID_NAME       DSIO_ERR_INVALID_PARAM
+#define DSIO_ERR_NAME_TOO_LONG      DSIO_ERR_INVALID_PARAM
+#define DSIO_ERR_INVALID_FD         DSIO_ERR_INVALID_PARAM
+#define DSIO_ERR_INVALID_RECFM      DSIO_ERR_INVALID_PARAM
+#define DSIO_ERR_INVALID_DSORG      DSIO_ERR_INVALID_PARAM
+#define DSIO_ERR_NOT_A_DATASET      DSIO_ERR_INVALID_PARAM
+#define DSIO_ERR_OPEN_FAILED        DSIO_ERR_IO_FAILED
+#define DSIO_ERR_READ_FAILED        DSIO_ERR_IO_FAILED
+#define DSIO_ERR_WRITE_FAILED       DSIO_ERR_IO_FAILED
+#define DSIO_ERR_CLOSE_FAILED       DSIO_ERR_IO_FAILED
+#define DSIO_ERR_FSEEK_FAILED       DSIO_ERR_IO_FAILED
+#define DSIO_ERR_FTELL_FAILED       DSIO_ERR_IO_FAILED
+#define DSIO_ERR_FLDATA_FAILED      DSIO_ERR_IO_FAILED
+#define DSIO_ERR_MEMBER_NOT_FOUND   DSIO_ERR_IO_FAILED
+#define DSIO_ERR_ALLOC_FAILED       DSIO_ERR_RESOURCE
+#define DSIO_ERR_BUFFER_OVERFLOW    DSIO_ERR_RESOURCE
+#define DSIO_ERR_RECORD_TOO_LONG    DSIO_ERR_RESOURCE
+#define DSIO_ERR_CCSID_CONVERSION   DSIO_ERR_UNSUPPORTED
+#define DSIO_ERR_UNSUPPORTED_OPERATION DSIO_ERR_UNSUPPORTED
+#define DSIO_ERR_INTERNAL_ERROR     DSIO_ERR_INTERNAL
 
 /* Get error message for error code */
 const char* dsio_strerror(dsio_error_t error);
@@ -300,62 +307,83 @@ int dsio_flush(int fd);
 #include <pthread.h>
 
 extern pthread_mutex_t descriptor_table_mutex;
+extern void* descriptor_table[MAX_FDS];
 
-/* Thread-safe bounds-checked accessors to prevent out-of-bounds when fd >= MAX_FDS */
-#define ADD_FD(fd)    do { \
-    pthread_mutex_lock(&descriptor_table_mutex); \
-    if ((fd) >= 0 && (fd) < MAX_FDS) descriptor_table[(fd)] = ((void*)(((unsigned long long)(fd)) | INV_ADDR_BIT)); \
-    pthread_mutex_unlock(&descriptor_table_mutex); \
-} while(0)
+/* Thread-safe helper functions for descriptor table access */
+static inline void add_fd_safe(int fd) {
+    pthread_mutex_lock(&descriptor_table_mutex);
+    if (fd >= 0 && fd < MAX_FDS) {
+        descriptor_table[fd] = ((void*)(((unsigned long long)(fd)) | INV_ADDR_BIT));
+    }
+    pthread_mutex_unlock(&descriptor_table_mutex);
+}
 
-#define ADD_DD(fd,dd) do { \
-    pthread_mutex_lock(&descriptor_table_mutex); \
-    if ((fd) >= 0 && (fd) < MAX_FDS) descriptor_table[(fd)] = (dd); \
-    pthread_mutex_unlock(&descriptor_table_mutex); \
-} while(0)
+static inline void add_dd_safe(int fd, void* dd) {
+    pthread_mutex_lock(&descriptor_table_mutex);
+    if (fd >= 0 && fd < MAX_FDS) {
+        descriptor_table[fd] = dd;
+    }
+    pthread_mutex_unlock(&descriptor_table_mutex);
+}
 
-#define GET_DD(fd) ({ \
-    void* __result = NULL; \
-    pthread_mutex_lock(&descriptor_table_mutex); \
-    if ((fd) >= 0 && (fd) < MAX_FDS) __result = descriptor_table[(fd)]; \
-    pthread_mutex_unlock(&descriptor_table_mutex); \
-    __result; \
-})
+static inline void* get_dd_safe(int fd) {
+    void* result = NULL;
+    pthread_mutex_lock(&descriptor_table_mutex);
+    if (fd >= 0 && fd < MAX_FDS) {
+        result = descriptor_table[fd];
+    }
+    pthread_mutex_unlock(&descriptor_table_mutex);
+    return result;
+}
 
-#define CLEAR_DD(fd)  do { \
-    pthread_mutex_lock(&descriptor_table_mutex); \
-    if ((fd) >= 0 && (fd) < MAX_FDS) descriptor_table[(fd)] = 0; \
-    pthread_mutex_unlock(&descriptor_table_mutex); \
-} while(0)
+static inline void clear_dd_safe(int fd) {
+    pthread_mutex_lock(&descriptor_table_mutex);
+    if (fd >= 0 && fd < MAX_FDS) {
+        descriptor_table[fd] = NULL;
+    }
+    pthread_mutex_unlock(&descriptor_table_mutex);
+}
 
-/* Thread-safe validation: descriptor slot is within bounds and occupied */
-#define IS_VALID_SLOT(slot) ({ \
-    int __valid = 0; \
-    pthread_mutex_lock(&descriptor_table_mutex); \
-    if ((slot) >= 0 && (slot) < MAX_FDS && descriptor_table[(slot)] != NULL) __valid = 1; \
-    pthread_mutex_unlock(&descriptor_table_mutex); \
-    __valid; \
-})
+static inline int is_valid_slot_safe(int slot) {
+    int valid = 0;
+    pthread_mutex_lock(&descriptor_table_mutex);
+    if (slot >= 0 && slot < MAX_FDS && descriptor_table[slot] != NULL) {
+        valid = 1;
+    }
+    pthread_mutex_unlock(&descriptor_table_mutex);
+    return valid;
+}
 
-/* Thread-safe check: slot contains a file descriptor (has INV_ADDR_BIT set) */
-#define IS_FD(slot) ({ \
-    int __is_fd = 0; \
-    pthread_mutex_lock(&descriptor_table_mutex); \
-    if ((slot) >= 0 && (slot) < MAX_FDS && descriptor_table[(slot)] != NULL && \
-        ((((unsigned long long) (descriptor_table[(slot)])) & INV_ADDR_BIT) != 0)) __is_fd = 1; \
-    pthread_mutex_unlock(&descriptor_table_mutex); \
-    __is_fd; \
-})
+static inline int is_fd_safe(int slot) {
+    int is_fd = 0;
+    pthread_mutex_lock(&descriptor_table_mutex);
+    if (slot >= 0 && slot < MAX_FDS && descriptor_table[slot] != NULL &&
+        ((((unsigned long long)(descriptor_table[slot])) & INV_ADDR_BIT) != 0)) {
+        is_fd = 1;
+    }
+    pthread_mutex_unlock(&descriptor_table_mutex);
+    return is_fd;
+}
 
-/* Thread-safe check: slot contains a dataset descriptor (no INV_ADDR_BIT) */
-#define IS_DD(slot) ({ \
-    int __is_dd = 0; \
-    pthread_mutex_lock(&descriptor_table_mutex); \
-    if ((slot) >= 0 && (slot) < MAX_FDS && descriptor_table[(slot)] != NULL && \
-        ((((unsigned long long) (descriptor_table[(slot)])) & INV_ADDR_BIT) == 0)) __is_dd = 1; \
-    pthread_mutex_unlock(&descriptor_table_mutex); \
-    __is_dd; \
-})
+static inline int is_dd_safe(int slot) {
+    int is_dd = 0;
+    pthread_mutex_lock(&descriptor_table_mutex);
+    if (slot >= 0 && slot < MAX_FDS && descriptor_table[slot] != NULL &&
+        ((((unsigned long long)(descriptor_table[slot])) & INV_ADDR_BIT) == 0)) {
+        is_dd = 1;
+    }
+    pthread_mutex_unlock(&descriptor_table_mutex);
+    return is_dd;
+}
+
+/* Simplified macros using helper functions */
+#define ADD_FD(fd)        add_fd_safe(fd)
+#define ADD_DD(fd,dd)     add_dd_safe(fd, dd)
+#define GET_DD(fd)        get_dd_safe(fd)
+#define CLEAR_DD(fd)      clear_dd_safe(fd)
+#define IS_VALID_SLOT(slot) is_valid_slot_safe(slot)
+#define IS_FD(slot)       is_fd_safe(slot)
+#define IS_DD(slot)       is_dd_safe(slot)
 
 typedef struct DatasetEntry {
     /* Original fields */
@@ -410,18 +438,19 @@ typedef struct DatasetEntry {
 #endif
 
 #if ZOSLIB_DATASET_LOGGING
-  #define DSIO_LOG_ERROR(fmt, ...) do { if (g_debug_enabled && g_log_level >= DSIO_LOG_ERROR) log_error(fmt, ##__VA_ARGS__); } while(0)
-  #define DSIO_LOG_WARN(fmt, ...) do { if (g_debug_enabled && g_log_level >= DSIO_LOG_WARN) log_warn(fmt, ##__VA_ARGS__); } while(0)
-  #define DSIO_LOG_INFO(fmt, ...) do { if (g_debug_enabled && g_log_level >= DSIO_LOG_INFO) log_info(fmt, ##__VA_ARGS__); } while(0)
-  #define DSIO_LOG_DEBUG(fmt, ...) do { if (g_debug_enabled && g_log_level >= DSIO_LOG_DEBUG) log_debug(fmt, ##__VA_ARGS__); } while(0)
-  #define DSIO_LOG_TRACE(fmt, ...) do { if (g_debug_enabled && g_log_level >= DSIO_LOG_TRACE) log_trace(fmt, ##__VA_ARGS__); } while(0)
-#else /* ZOSLIB_ENABLE_DATASETIO == 0 */
+  /* Simplified logging macros using centralized dsio_log() function */
+  #define DSIO_LOG_ERROR(fmt, ...) dsio_log(DSIO_LOG_ERROR, fmt, ##__VA_ARGS__)
+  #define DSIO_LOG_WARN(fmt, ...)  dsio_log(DSIO_LOG_WARN, fmt, ##__VA_ARGS__)
+  #define DSIO_LOG_INFO(fmt, ...)  dsio_log(DSIO_LOG_INFO, fmt, ##__VA_ARGS__)
+  #define DSIO_LOG_DEBUG(fmt, ...) dsio_log(DSIO_LOG_DEBUG, fmt, ##__VA_ARGS__)
+  #define DSIO_LOG_TRACE(fmt, ...) dsio_log(DSIO_LOG_TRACE, fmt, ##__VA_ARGS__)
+#else /* ZOSLIB_DATASET_LOGGING == 0 */
   #define DSIO_LOG_ERROR(fmt, ...) ((void)0)
-  #define DSIO_LOG_WARN(fmt, ...) ((void)0)
-  #define DSIO_LOG_INFO(fmt, ...) ((void)0)
+  #define DSIO_LOG_WARN(fmt, ...)  ((void)0)
+  #define DSIO_LOG_INFO(fmt, ...)  ((void)0)
   #define DSIO_LOG_DEBUG(fmt, ...) ((void)0)
   #define DSIO_LOG_TRACE(fmt, ...) ((void)0)
-#endif /* ZOSLIB_ENABLE_DATASETIO */
+#endif /* ZOSLIB_DATASET_LOGGING */
 
 /* ========================================================================
  * ENHANCED INTERNAL STRUCTURES

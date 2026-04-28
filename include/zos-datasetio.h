@@ -296,22 +296,66 @@ int dsio_flush(int fd);
 #define MAX_FDS 1024
 #define INV_ADDR_BIT  (0x0000000080000000ULL)
 
-/* Bounds-checked accessors to prevent out-of-bounds when fd >= MAX_FDS */
-#define ADD_FD(fd)    do { if ((fd) >= 0 && (fd) < MAX_FDS) descriptor_table[(fd)] = ((void*)(((unsigned long long)(fd)) | INV_ADDR_BIT)); } while(0)
-#define ADD_DD(fd,dd) do { if ((fd) >= 0 && (fd) < MAX_FDS) descriptor_table[(fd)] = (dd); } while(0)
-#define GET_DD(fd)    (((fd) >= 0 && (fd) < MAX_FDS) ? descriptor_table[(fd)] : NULL)
-#define CLEAR_DD(fd)  do { if ((fd) >= 0 && (fd) < MAX_FDS) descriptor_table[(fd)] = 0; } while(0)
+/* Thread-safe descriptor table access */
+#include <pthread.h>
 
-/* Validate descriptor slot is within bounds and occupied */
-#define IS_VALID_SLOT(slot)  ((slot) >= 0 && (slot) < MAX_FDS && descriptor_table[(slot)] != NULL)
+extern pthread_mutex_t descriptor_table_mutex;
 
-/* Check if slot contains a file descriptor (has INV_ADDR_BIT set) */
-#define IS_FD(slot)   (IS_VALID_SLOT(slot) && \
-                       ((((unsigned long long) (descriptor_table[(slot)])) & INV_ADDR_BIT) != 0))
+/* Thread-safe bounds-checked accessors to prevent out-of-bounds when fd >= MAX_FDS */
+#define ADD_FD(fd)    do { \
+    pthread_mutex_lock(&descriptor_table_mutex); \
+    if ((fd) >= 0 && (fd) < MAX_FDS) descriptor_table[(fd)] = ((void*)(((unsigned long long)(fd)) | INV_ADDR_BIT)); \
+    pthread_mutex_unlock(&descriptor_table_mutex); \
+} while(0)
 
-/* Check if slot contains a dataset descriptor (no INV_ADDR_BIT) */
-#define IS_DD(slot)   (IS_VALID_SLOT(slot) && \
-                       ((((unsigned long long) (descriptor_table[(slot)])) & INV_ADDR_BIT) == 0))
+#define ADD_DD(fd,dd) do { \
+    pthread_mutex_lock(&descriptor_table_mutex); \
+    if ((fd) >= 0 && (fd) < MAX_FDS) descriptor_table[(fd)] = (dd); \
+    pthread_mutex_unlock(&descriptor_table_mutex); \
+} while(0)
+
+#define GET_DD(fd) ({ \
+    void* __result = NULL; \
+    pthread_mutex_lock(&descriptor_table_mutex); \
+    if ((fd) >= 0 && (fd) < MAX_FDS) __result = descriptor_table[(fd)]; \
+    pthread_mutex_unlock(&descriptor_table_mutex); \
+    __result; \
+})
+
+#define CLEAR_DD(fd)  do { \
+    pthread_mutex_lock(&descriptor_table_mutex); \
+    if ((fd) >= 0 && (fd) < MAX_FDS) descriptor_table[(fd)] = 0; \
+    pthread_mutex_unlock(&descriptor_table_mutex); \
+} while(0)
+
+/* Thread-safe validation: descriptor slot is within bounds and occupied */
+#define IS_VALID_SLOT(slot) ({ \
+    int __valid = 0; \
+    pthread_mutex_lock(&descriptor_table_mutex); \
+    if ((slot) >= 0 && (slot) < MAX_FDS && descriptor_table[(slot)] != NULL) __valid = 1; \
+    pthread_mutex_unlock(&descriptor_table_mutex); \
+    __valid; \
+})
+
+/* Thread-safe check: slot contains a file descriptor (has INV_ADDR_BIT set) */
+#define IS_FD(slot) ({ \
+    int __is_fd = 0; \
+    pthread_mutex_lock(&descriptor_table_mutex); \
+    if ((slot) >= 0 && (slot) < MAX_FDS && descriptor_table[(slot)] != NULL && \
+        ((((unsigned long long) (descriptor_table[(slot)])) & INV_ADDR_BIT) != 0)) __is_fd = 1; \
+    pthread_mutex_unlock(&descriptor_table_mutex); \
+    __is_fd; \
+})
+
+/* Thread-safe check: slot contains a dataset descriptor (no INV_ADDR_BIT) */
+#define IS_DD(slot) ({ \
+    int __is_dd = 0; \
+    pthread_mutex_lock(&descriptor_table_mutex); \
+    if ((slot) >= 0 && (slot) < MAX_FDS && descriptor_table[(slot)] != NULL && \
+        ((((unsigned long long) (descriptor_table[(slot)])) & INV_ADDR_BIT) == 0)) __is_dd = 1; \
+    pthread_mutex_unlock(&descriptor_table_mutex); \
+    __is_dd; \
+})
 
 typedef struct DatasetEntry {
     /* Original fields */

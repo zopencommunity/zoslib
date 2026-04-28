@@ -30,13 +30,54 @@ extern FILE *__fopen_orig(const char *filename, const char *mode) __asm("@@A0024
  */
 extern int __close_orig(int) __asm("close");
 
+/* Thread-safe descriptor table */
 void* descriptor_table[MAX_FDS] = { 0 };
+pthread_mutex_t descriptor_table_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static dsio_recfm_t detect_recfm_from_fldata(const fldata_t* fdata);
 static int map_dsio_error_to_errno(dsio_error_t dsio_err);
 
 static dsio_dsorg_t detect_dsorg_from_fldata(const fldata_t* fdata);
 static int flush_rec_buf(DatasetEntry* dentry);
+
+/*
+ * cleanup_dataset_resources - Centralized cleanup for error paths
+ * 
+ * Ensures all resources are properly freed in the correct order.
+ * Safe to call with NULL pointers - will skip cleanup for NULL values.
+ * 
+ * @param dentry: DatasetEntry to free (will free rec_buf and dentry itself)
+ * @param fp: FILE* to close (if different from dentry->file_ptr)
+ * @param fd: File descriptor to close (if >= 0)
+ */
+static void cleanup_dataset_resources(DatasetEntry* dentry, FILE* fp, int fd) {
+    /* Close file descriptor first (if valid and in range) */
+    if (fd >= 0 && fd < MAX_FDS) {
+        __close_orig(fd);
+    }
+    
+    /* Close FILE* if provided and different from dentry's file_ptr */
+    if (fp && (!dentry || fp != dentry->file_ptr)) {
+        fclose(fp);
+    }
+    
+    /* Free DatasetEntry and its resources */
+    if (dentry) {
+        /* Close dentry's FILE* if not already closed */
+        if (dentry->file_ptr && dentry->file_ptr != fp) {
+            fclose(dentry->file_ptr);
+        }
+        
+        /* Free record buffer */
+        if (dentry->rec_buf) {
+            free(dentry->rec_buf);
+            dentry->rec_buf = NULL;
+        }
+        
+        /* Free the entry itself */
+        free(dentry);
+    }
+}
 
 static const char DATASET_CHAR[] = "ABCDEFGHIJKLMNOPQRSTUVWYZ$#@";
 
@@ -116,14 +157,13 @@ int create_dataset_fd(const char* name, unsigned short file_ccsid, int flags)
 
   DatasetEntry* dentry = create_entry(dd, file_ccsid);
   if (!dentry) {
-    fclose(dd);
+    cleanup_dataset_resources(NULL, dd, -1);
     errno = ENOMEM;
     return -1;
   }
   
   if (parse_and_store_name(dentry, name) != 0) {
-    fclose(dd);
-    free_entry(dentry);
+    cleanup_dataset_resources(dentry, NULL, -1);
     errno = EINVAL;
     return -1;
   }
@@ -174,7 +214,7 @@ int create_dataset_fd(const char* name, unsigned short file_ccsid, int flags)
     dd = __fopen_orig(name, reopen_mode);
     if (!dd) {
       set_entry_error(dentry, DSIO_ERR_OPEN_FAILED, "Failed to reopen dataset in binary mode");
-      free(dentry);
+      cleanup_dataset_resources(dentry, NULL, -1);
       errno = map_dsio_error_to_errno(DSIO_ERR_OPEN_FAILED);
       return -1;
     }
@@ -197,8 +237,7 @@ int create_dataset_fd(const char* name, unsigned short file_ccsid, int flags)
   dentry->rec_buf = malloc(dentry->rec_buf_size + 1);
   if (!dentry->rec_buf) {
     set_entry_error(dentry, DSIO_ERR_ALLOC_FAILED, "Failed to allocate record buffer");
-    fclose(dd);
-    free(dentry);
+    cleanup_dataset_resources(dentry, NULL, -1);
     errno = map_dsio_error_to_errno(DSIO_ERR_ALLOC_FAILED);
     return -1;
   }
@@ -207,10 +246,7 @@ int create_dataset_fd(const char* name, unsigned short file_ccsid, int flags)
   if (fd < 0 || fd >= MAX_FDS) {
     DSIO_LOG_DEBUG("create_dataset_fd: ERROR - GET_DUMMY_FD failed or fd out of range (fd=%d, max=%d)\n", fd, MAX_FDS);
     set_entry_error(dentry, DSIO_ERR_INTERNAL_ERROR, "Failed to allocate or track file descriptor");
-    if (fd >= 0) close(fd);
-    fclose(dd);
-    if (dentry->rec_buf) free(dentry->rec_buf);
-    free(dentry);
+    cleanup_dataset_resources(dentry, NULL, fd);
     errno = (fd >= MAX_FDS) ? EMFILE : map_dsio_error_to_errno(DSIO_ERR_INTERNAL_ERROR);
     return -1;
   }

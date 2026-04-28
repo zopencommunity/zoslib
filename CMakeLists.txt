@@ -55,6 +55,8 @@ if(ZOSLIB_QUICK_STARTUP)
        ZOSLIB_QUICK_STARTUP)
 endif()
 
+option(ZOSLIB_ENABLE_DATASETIO "Enable dataset I/O support" ON)
+
 if(ZOSLIB_ENABLE_DATASETIO)
   list(APPEND zoslib_defines
        ZOSLIB_ENABLE_DATASETIO=1)

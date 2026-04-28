@@ -22,8 +22,6 @@
 
 extern FILE *__fopen_orig(const char *filename, const char *mode) __asm("@@A00246");
 
-#if ZOSLIB_ENABLE_DATASETIO
-
 /* __close_orig is defined in zos-io.cc as the original close() syscall.
  * We need it in close_dataset to close the dummy /dev/null fd without
  * routing through our __close() override (which would cause reentrancy).
@@ -1920,6 +1918,4 @@ int dsio_get_ccsid_config(int fd, dsio_ccsid_config_t* config) {
     
     return 0;
 }
-
-#endif /* ZOSLIB_ENABLE_DATASETIO */
 

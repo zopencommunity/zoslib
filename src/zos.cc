@@ -2675,34 +2675,27 @@ static void setProcessEnvars() {
 }
 
 int __zinit::initialize(const zoslib_config_t &aconfig) {
-#if ZOSLIB_ENABLE_DATASETIO
   ADD_FD(STDIN_FILENO);
   ADD_FD(STDOUT_FILENO);
   ADD_FD(STDERR_FILENO);
-#endif
 
-#if ZOSLIB_ENABLE_DATASETIO
   char* env = getenv("ZOSLIB_DEBUG");
   if (env && (strcmp(env, "1") == 0 || strcasecmp(env, "ON") == 0)) {
     dsio_enable_debug(1);
   } else {
     g_debug_enabled = 0;
   }
-#endif
 
   memcpy(&config, &aconfig, sizeof(config));
 
-#if ZOSLIB_ENABLE_DATASETIO
-  /* Default to enabled, only disable if explicitly set to NO/0 */
   char* ds_env = getenv(config.DATASET_SUPPORT_ENVAR);
-  if (ds_env && (strcasecmp(ds_env, "NO") == 0 || strcmp(ds_env, "0") == 0)) {
+  if (ds_env && (strcasecmp(ds_env, "YES") == 0 || strcmp(ds_env, "1") == 0)) {
+    ds_support_mode = DS_SUPPORT_YES;
+  } else if (ds_env && (strcasecmp(ds_env, "NO") == 0 || strcmp(ds_env, "0") == 0)) {
     ds_support_mode = DS_SUPPORT_NO;
   } else {
-    ds_support_mode = DS_SUPPORT_YES;
+    ds_support_mode = DS_SUPPORT_NO;
   }
-#else
-  ds_support_mode = DS_SUPPORT_NO;
-#endif
 
   __galloc_info = new __Cache;
 
@@ -2836,7 +2829,6 @@ int __zinit::setEnvarHelpMap() {
                      "always displayed if logging of memory diagnostic "
                      "messages is enabled"));
 
-#if ZOSLIB_ENABLE_DATASETIO
   envarHelpMap.insert(std::make_pair(
       zoslibEnvar(config.DATASET_SUPPORT_ENVAR, std::string("YES")),
       "Enable support for MVS datasets via // prefix"));
@@ -2844,7 +2836,6 @@ int __zinit::setEnvarHelpMap() {
   envarHelpMap.insert(std::make_pair(
       zoslibEnvar(config.DATASET_SUPPORT_ENVAR, std::string("NO")),
       "(default) Disable MVS dataset support"));
-#endif
 
   return __update_envar_settings(NULL);
 }

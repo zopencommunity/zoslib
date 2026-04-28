@@ -1,15 +1,9 @@
 #ifndef __DATASET_IO__
 #define __DATASET_IO__ 1
 
-#ifndef ZOSLIB_ENABLE_DATASETIO
-  #define ZOSLIB_ENABLE_DATASETIO 0
-#endif /* ZOSLIB_ENABLE_DATASETIO */
-
 #if defined(__cplusplus)
 extern "C" {
 #endif
-
-#if ZOSLIB_ENABLE_DATASETIO
 
 #include <stddef.h>
 #include <stdint.h>
@@ -509,25 +503,6 @@ int extract_qualifiers(const char* name, char* hlq, char* llq, size_t len);
 #define ERR_MSG_INVALID_FD "Invalid file descriptor: %d"
 #define ERR_MSG_FLDATA_FAILED "fldata() failed for dataset"
 #define ERR_MSG_CCSID_CONV "CCSID conversion failed: %d -> %d"
-
-#else /* ZOSLIB_ENABLE_DATASETIO == 0 */
-
-#define IS_DATASET(name) (0)
-#define DSIO_LOG_ERROR(fmt, ...) ((void)0)
-#define DSIO_LOG_WARN(fmt, ...)  ((void)0)
-#define DSIO_LOG_INFO(fmt, ...)  ((void)0)
-#define DSIO_LOG_DEBUG(fmt, ...) ((void)0)
-#define DSIO_LOG_TRACE(fmt, ...) ((void)0)
-
-#define ADD_FD(fd)    ((void)0)
-#define ADD_DD(fd,dd) ((void)0)
-#define GET_DD(fd)    (NULL)
-#define GET_DUMMY_FD(flags) (-1)
-#define CLEAR_DD(fd)  ((void)0)
-#define IS_FD(fd)     (1)
-#define IS_DD(fd)     (0)
-
-#endif /* ZOSLIB_ENABLE_DATASETIO */
 
 #if defined(__cplusplus)
 }

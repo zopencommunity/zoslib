@@ -55,6 +55,14 @@ name of the log file associated with __MEMORY_USAGE_LOG_LEVEL, including 'stdout
 .B __RUNDEBUG
 set to toggle debug ZOSLIB mode
 
+.TP
+.B ZOSLIB_DATASET_SUPPORT
+controls dataset I/O support at runtime. Set to NO or 0 to disable dataset I/O operations, or YES or 1 to enable. When enabled, POSIX file operations (open, read, write, etc.) can work with z/OS datasets using the //'DATASET.NAME' syntax. Dataset I/O is disabled by default at runtime; set this variable to YES or 1 to enable.
+
+.TP
+.B ZOSLIB_DEBUG
+set to enable debug logging for dataset I/O operations when __DATASET_SUPPORT is enabled. Logs are written to stderr and include detailed information about dataset operations, record processing, and error conditions.
+
 .SH EXAMPLES
 To set the __UNTAGGED_READ_MODE environment variable to STRICT and disable explicit conversion of data:
 
@@ -67,6 +75,34 @@ To set the STDOUT CCSID to 819 (ASCII):
 .B export __STDOUT_CCSID=819
 
 This will cause ZOSLIB to tag the stdout file descriptor to 819 and enable auto-conversion.
+
+To enable dataset I/O support at runtime:
+
+.B export ZOSLIB_DATASET_SUPPORT=YES
+
+This will enable dataset I/O operations, allowing POSIX file operations to work with z/OS datasets.
+
+To disable dataset I/O support at runtime:
+
+.B export ZOSLIB_DATASET_SUPPORT=NO
+
+This will disable dataset I/O operations, causing POSIX file operations to only work with USS files.
+
+To enable debug logging for dataset I/O operations:
+
+.B export ZOSLIB_DEBUG=1
+
+.B cat //'MY.DATASET'
+
+This will enable detailed logging of dataset operations to stderr, useful for troubleshooting dataset I/O issues.
+
+To read from a z/OS dataset using standard tools:
+
+.B cat //'USER.DATA.SET'
+
+.B grep "pattern" //'SYS1.PARMLIB(IEASYS00)'
+
+These commands will work with z/OS datasets when dataset I/O support is enabled (default).
 
 .SH AUTHOR
 Written by Igor Todorovski.

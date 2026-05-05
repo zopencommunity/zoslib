@@ -33,10 +33,12 @@ __Z_EXPORT int __mkstemp_ascii(char*);
 #define realpath __realpath_replaced
 #undef mkstemp
 #define mkstemp __mkstemp_replaced
+#ifdef ZOSLIB_INSTRUMENTATION
 #undef malloc
 #define malloc __malloc_replaced
 #undef free
 #define free __free_replaced
+#endif
 #endif
 
 // LE fix since posix_memalign is exposed in 2.5
@@ -74,8 +76,10 @@ extern "C" {
  */
 #undef realpath
 __Z_EXPORT char *realpath(const char * __restrict__, char * __restrict__) __asm("__realpath_extended");
+#ifdef ZOSLIB_INSTRUMENTATION
 __Z_EXPORT void* malloc(size_t size) __THROW __asm("__zoslib_malloc") ;
 __Z_EXPORT void free(void* ptr) __THROW __asm("__zoslib_free") ;
+#endif
 
 #ifdef __NATIVE_ASCII_F
 /**

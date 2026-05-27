@@ -19,7 +19,7 @@ ZOSLIB implements the following:
 - A subset of POSIX APIs that are not available in the LE C Runtime Library
 - EBCDIC <-> ASCII conversion C APIs
 - APIs for improved diagnostic reporting
-- and more!
+- and more!kkkkkk
 
 ## System Requirements
 

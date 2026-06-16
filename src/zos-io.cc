@@ -768,11 +768,26 @@ int __tag_existing_file(int fd) {
     return 0;
   }
 
+  int ccsid = 819;
+  int txtflag = 1;
+
+  struct file_tag tag;
+
   if (strcmp(encode_file_existing, "BINARY") == 0) {
-    return __setfdbinary(fd);
+    ccsid = FT_BINARY;
+    txtflag = 0;
+  } else {
+    unsigned short ccsidEncodeFileExisting = __toCcsid(encode_file_existing);
+    if (ccsidEncodeFileExisting)
+      ccsid = ccsidEncodeFileExisting;
   }
 
-  return __chgfdcodeset(fd, encode_file_existing);
+  tag.ft_ccsid = ccsid;
+  tag.ft_txtflag = txtflag;
+  tag.ft_deferred = 0;
+  tag.ft_rsvflags = 0;
+
+  return fcntl(fd, F_SETTAG, &tag);
 }
 
 int __chgfdcodeset(int fd, char* codeset) {
@@ -891,12 +906,17 @@ int __open_ascii(const char *filename, int opts, ...) {
     }
     // Enable auto-conversion of untagged files
     else if (S_ISREG(sb.st_mode)) {
-      __tag_existing_file(fd);
+      // Only tag if file is untagged (ccsid == 0 and txtflag == 0)
+      if (sb.st_tag.ft_ccsid == 0 && sb.st_tag.ft_txtflag == 0) {
+        int tag_result = __tag_existing_file(fd);
 
-      // Refresh file tag state after retagging
-      struct stat updated_sb;
-      if (fstat(fd, &updated_sb) == 0) {
-        sb = updated_sb;
+        // Refresh file tag state after retagging only if successful and variable is set
+        if (tag_result == 0 && getenv("_ENCODE_FILE_EXISTING")) {
+          struct stat updated_sb;
+          if (fstat(fd, &updated_sb) == 0) {
+            sb.st_tag = updated_sb.st_tag;  // Only update tag field
+          }
+        }
       }
 
       errno = old_errno;
@@ -943,12 +963,17 @@ FILE *__fopen_ascii(const char *filename, const char *mode) {
     }
     // Enable auto-conversion of untagged files
     else if (S_ISREG(sb.st_mode)) {
-      __tag_existing_file(fd);
+      // Only tag if file is untagged (ccsid == 0 and txtflag == 0)
+      if (sb.st_tag.ft_ccsid == 0 && sb.st_tag.ft_txtflag == 0) {
+        int tag_result = __tag_existing_file(fd);
 
-      // Refresh file tag state after retagging
-      struct stat updated_sb;
-      if (fstat(fd, &updated_sb) == 0) {
-        sb = updated_sb;
+        // Refresh file tag state after retagging only if successful and variable is set
+        if (tag_result == 0 && getenv("_ENCODE_FILE_EXISTING")) {
+          struct stat updated_sb;
+          if (fstat(fd, &updated_sb) == 0) {
+            sb.st_tag = updated_sb.st_tag;  // Only update tag field
+          }
+        }
       }
 
       errno = old_errno;

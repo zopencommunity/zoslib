@@ -53,7 +53,7 @@
 #include <unordered_map>
 #include <vector>
 
-#if defined(ZOSLIB_ENABLE_V2R5_FEATURES)
+#if defined(ZOSLIB_ENABLE_V2R5_FEATURES) && !defined(__XPLAT)
 int (*epoll_create)(int) = 0;
 int (*epoll_create1)(int) = 0;
 int (*epoll_ctl)(int, int, int, struct epoll_event *) = 0;
@@ -65,11 +65,20 @@ int (*inotify_init1)(int) = 0;
 int (*inotify_add_watch)(int, const char *, uint32_t) = 0;
 int (*inotify_rm_watch)(int, int) = 0;
 int (*accept4)(int s, struct sockaddr * addr, socklen_t * addrlen, int flags) = 0;
-int (*futimes)(int fd, const struct timeval tv[2]) = 0;
-int (*lutimes)(const char *filename, const struct timeval tv[2]) = 0;
-int (*clock_gettime)(clockid_t cld_id, struct timespec * tp) = 0;
 int (*pipe2)(int pipefd[2], int flags) = 0;
 int (*getentropy)(void *, size_t) = 0;
+#endif
+/* futimes/lutimes require both __XPLAT and __UU in system headers,
+ * so only suppress zoslib's fallback when both are defined. */
+#if defined(ZOSLIB_ENABLE_V2R5_FEATURES) && \
+    !(defined(__XPLAT) && defined(__UU))
+int (*futimes)(int fd, const struct timeval tv[2]) = 0;
+int (*lutimes)(const char *filename, const struct timeval tv[2]) = 0;
+#endif
+/* clock_gettime and nanosleep are gated by __RT in system headers, not
+ * __XPLAT, so they are independent of _XPLATFORM_SOURCE. */
+#if defined(ZOSLIB_ENABLE_V2R5_FEATURES)
+int (*clock_gettime)(clockid_t cld_id, struct timespec * tp) = 0;
 int (*nanosleep)(const struct timespec*, struct timespec*) = 0;
 #endif
 
@@ -2998,7 +3007,7 @@ extern "C" int nanosleep(const struct timespec *req, struct timespec *rem) {
   }
 
 void __zinit::populateLEFunctionPointers() {
-#if defined(ZOSLIB_ENABLE_V2R5_FEATURES)
+#if defined(ZOSLIB_ENABLE_V2R5_FEATURES) && !defined(__XPLAT)
   // LE vector table offset calculated by:
   // cat "//'CEE.SCEELIB(CELQS003)'" | grep "'$FUNCTION_NAME'"
   if (__is_os_level_at_or_above(ZOSLVL_V2R5)) {
@@ -3015,20 +3024,39 @@ void __zinit::populateLEFunctionPointers() {
     MAP_LE_FUNC_ELSE_ZOSLIB_FUNC(inotify_add_watch, 0, "__inotify_add_watch_a", 0xDBB);
     MAP_LE_FUNC_ELSE_ZOSLIB_FUNC(pipe2, __pipe2, "pipe2", 0xDBD);
     MAP_LE_FUNC_ELSE_ZOSLIB_FUNC(accept4, __accept4, "__accept4_a", 0xDA8);
-    MAP_LE_FUNC_ELSE_ZOSLIB_FUNC(nanosleep, __nanosleep, "nanosleep", 0xE22);
     MAP_LE_FUNC_ELSE_ZOSLIB_FUNC(getentropy, __getentropy, "getentropy", 0xE21);
-    MAP_LE_FUNC_ELSE_ZOSLIB_FUNC(clock_gettime, __clock_gettime, "clock_gettime", 0xDAD);
+  }
+  else {
+    pipe2 = __pipe2;
+    accept4 = __accept4;
+    getentropy = __getentropy;
+  }
+#endif
+/* futimes/lutimes require both __XPLAT and __UU in system headers,
+ * so only suppress zoslib's fallback when both are defined. */
+#if defined(ZOSLIB_ENABLE_V2R5_FEATURES) && \
+    !(defined(__XPLAT) && defined(__UU))
+  if (__is_os_level_at_or_above(ZOSLVL_V2R5)) {
+    char ppa_funcname[PPA_FUNC_LENGTH] = {0};
     MAP_LE_FUNC_ELSE_ZOSLIB_FUNC(futimes, __futimes, "futimes", 0xDE2);
     MAP_LE_FUNC_ELSE_ZOSLIB_FUNC(lutimes, __lutimes, "__lutimes_a", 0xDE6);
   }
   else {
-    clock_gettime = __clock_gettime;
     futimes = __futimes;
     lutimes = __lutimes;
-    pipe2 = __pipe2;
-    accept4 = __accept4;
+  }
+#endif
+#if defined(ZOSLIB_ENABLE_V2R5_FEATURES)
+  /* clock_gettime and nanosleep are gated by __RT in system headers,
+   * not __XPLAT, so initialise them independently. */
+  if (__is_os_level_at_or_above(ZOSLVL_V2R5)) {
+    char ppa_funcname[PPA_FUNC_LENGTH] = {0};
+    MAP_LE_FUNC_ELSE_ZOSLIB_FUNC(nanosleep, __nanosleep, "nanosleep", 0xE22);
+    MAP_LE_FUNC_ELSE_ZOSLIB_FUNC(clock_gettime, __clock_gettime, "clock_gettime", 0xDAD);
+  }
+  else {
+    clock_gettime = __clock_gettime;
     nanosleep = __nanosleep;
-    getentropy = __getentropy;
   }
 #endif
 }

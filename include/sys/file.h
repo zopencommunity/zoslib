@@ -11,9 +11,18 @@
 
 #include "zos-macros.h"
 
+/* zoslib provides flock when the system does not.
+ * The system's sys/file.h only provides flock when:
+ *   __EDC_TARGET >= __EDC_LE4205 AND __XPLAT is defined
+ * Since features.h itself gates __XPLAT with __EDC_TARGET >= __EDC_LE4205,
+ * __XPLAT is impossible when __TARGET_LIB__ < 0x42050000, so the first
+ * branch needs no !defined(__XPLAT) guard - zoslib's flock is always
+ * needed there. Only the >= 0x42050000 branch needs the __XPLAT guard.
+ */
 #if (__TARGET_LIB__ < 0x42050000) || \
     (__TARGET_LIB__ >= 0x42050000 && \
-    (((_POSIX_C_SOURCE + 0) < 200809L) && !defined(_XPLATFORM_SOURCE)))
+    (((_POSIX_C_SOURCE + 0) < 200809L) && !defined(_XPLATFORM_SOURCE) && \
+     !defined(__XPLAT)))
 #include <sys/file.h>
 
 #define   LOCK_SH  0x01    // shared file lock

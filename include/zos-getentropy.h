@@ -1,9 +1,11 @@
 #ifndef __ZOS_GET_ENTROPY_H_
 #define __ZOS_GET_ENTROPY_H_
 
-#if (__TARGET_LIB__ < 0x42050000) || \
+#if !defined(__XPLAT) && \
+    (((__TARGET_LIB__ < 0x42050000) || \
     (__TARGET_LIB__ >= 0x42050000 && \
-    (((_POSIX_C_SOURCE + 0) < 200809L) && !defined(_XPLATFORM_SOURCE))) || defined(ZOSLIB_ENABLE_V2R5_FEATURES)
+    (((_POSIX_C_SOURCE + 0) < 200809L) && !defined(_XPLATFORM_SOURCE)))) || \
+    defined(ZOSLIB_ENABLE_V2R5_FEATURES))
 #include "zos-macros.h"
 #include <sys/types.h>
 
@@ -16,7 +18,7 @@ extern "C" {
  * \param [in] number of random bytes to generate.
  * \return On success, returns 0, or -1 on error.
  */
-#if (__EDC_TARGET < 0x42050000) && defined(ZOSLIB_ENABLE_V2R5_FEATURES)
+#if defined(ZOSLIB_ENABLE_V2R5_FEATURES)
 __Z_EXPORT extern int (*getentropy)(void *, size_t);
 __Z_EXPORT int __getentropy(void* buffer, size_t length);
 #else
@@ -28,4 +30,4 @@ __Z_EXPORT int getentropy(void* buffer, size_t length);
 #endif
 
 #endif // __ZOS_GET_ENTROPY_H_
-#endif // (__EDC_TARGET < 0x42050000) || defined(ZOSLIB_ENABLE_V2R5_FEATURES)
+#endif // !__XPLAT && (__TARGET_LIB__ condition || ZOSLIB_ENABLE_V2R5_FEATURES)

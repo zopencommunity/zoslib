@@ -71,9 +71,10 @@ static void _slow(int size, void* output) {
 
 #if defined(ZOSLIB_ENABLE_V2R5_FEATURES)
 extern "C" int __getentropy(void* output, size_t size) {
-#else
+#elif !defined(__XPLAT)
 extern "C" int getentropy(void* output, size_t size) {
 #endif
+#if defined(ZOSLIB_ENABLE_V2R5_FEATURES) || !defined(__XPLAT)
   if (size > 257) {
     errno = EIO;
     return -1;
@@ -140,3 +141,4 @@ extern "C" int getentropy(void* output, size_t size) {
 #endif
   return 0;
 }
+#endif /* ZOSLIB_ENABLE_V2R5_FEATURES || !__XPLAT */

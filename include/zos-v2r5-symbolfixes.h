@@ -12,7 +12,8 @@
 // error so they are not detected by autotools-based configure scripts. 
 #if (__TARGET_LIB__ < 0x42050000) || \
     (__TARGET_LIB__ >= 0x42050000 && \
-    (((_POSIX_C_SOURCE + 0) < 200809L) && !defined(_XPLATFORM_SOURCE)))
+    (((_POSIX_C_SOURCE + 0) < 200809L) && !defined(_XPLATFORM_SOURCE) && \
+     !defined(__XPLAT) && !defined(__SUSV4_POSIX)))
 #pragma redefine_extname readlinkat readlinkat_undefined
 #pragma redefine_extname openat openat_undefined
 #pragma redefine_extname linkat linkat_undefined
@@ -95,7 +96,9 @@
 #endif
 
 //TODO: remove this when LE's fdopendir is fixed
+#if !defined(__SUSV4_POSIX)
 #pragma redefine_extname fdopendir fdopendir_undefined
+#endif
 #pragma redefine_extname memfd_create memfd_create_undefined
 
 #endif // ZOS_V2R5_SYMBOLFIXES_H

@@ -14,7 +14,8 @@
 #include <features.h>
 
 
-#if defined(ZOSLIB_OVERRIDE_CLIB) || defined(ZOSLIB_OVERRIDE_CLIB_DIRENT)
+#if (defined(ZOSLIB_OVERRIDE_CLIB) || defined(ZOSLIB_OVERRIDE_CLIB_DIRENT)) && \
+    !defined(__SUSV4_POSIX)
 /* Modify function names in header to avoid conflict with new prototypes 
 TODO: remove this when LE's fdopendir is fixed */
 
@@ -23,7 +24,8 @@ TODO: remove this when LE's fdopendir is fixed */
 #endif
 #include_next <dirent.h>
 
-#if defined(ZOSLIB_OVERRIDE_CLIB) || defined(ZOSLIB_OVERRIDE_CLIB_DIRENT)
+#if (defined(ZOSLIB_OVERRIDE_CLIB) || defined(ZOSLIB_OVERRIDE_CLIB_DIRENT)) && \
+    !defined(__SUSV4_POSIX)
 
 #undef fdopendir 
 

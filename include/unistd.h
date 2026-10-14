@@ -62,9 +62,10 @@ __Z_EXPORT ssize_t readlink(const char *path, char *buf, size_t bufsiz) __asm("_
 extern "C" {
 #endif
 
-#if (__EDC_TARGET < 0x42050000) && defined(ZOSLIB_ENABLE_V2R5_FEATURES)
+#if defined(ZOSLIB_ENABLE_V2R5_FEATURES) && \
+    !defined(__XPLAT)
 __Z_EXPORT extern int (*pipe2)(int pipefd[2], int flags);
-#else
+#endif
 
 /**
  * Execute a file.
@@ -77,7 +78,6 @@ __Z_EXPORT extern int (*pipe2)(int pipefd[2], int flags);
  */
 __Z_EXPORT int execvpe(const char *name, char *const argv[],
                        char *const envp[]);
-#endif
 
 #include <zos-getentropy.h>
 

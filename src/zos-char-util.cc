@@ -14,6 +14,7 @@
 
 #include <_Ccsid.h>
 #include <ctest.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <iconv.h>
 #include <pthread.h>
@@ -30,32 +31,35 @@ extern "C" {
 static int ccsid_guess_buf_size = 4096;
 
 static int utf8scan(const unsigned char *str, unsigned size, char *errmsg,
-                    size_t sz) {
+                    size_t sz, size_t *pending) {
   static int byte0_next_state[256] = {
-      0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-      0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-      0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-      0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-      0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-      0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-      0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-      0,  0,  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+       0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+       0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+       0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+       0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+       0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+       0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+       0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+       0,  0, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
       -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
       -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
-      -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 1,  1,  1,  1,  1,  1,
-      1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
-      1,  1,  1,  1,  1,  1,  1,  1,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,
-      2,  2,  2,  2,  2,  2,  3,  3,  3,  3,  3,  3,  3,  3,  -1, -1, -1, -1,
+      -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,  1,  1,  1,  1,
+       1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,  1,
+       1,  1,  1,  1,  1,  1,  1,  1,  2,  2,  2,  2,  2,  2,  2,  2,  2,  2,
+       2,  2,  2,  2,  2,  2,  3,  3,  3,  3,  3, -1, -1, -1, -1, -1, -1, -1,
       -1, -1, -1, -1};
 
-  unsigned char onebyte;
+  unsigned char onebyte = 0;
   int state = 0;
   unsigned int value;
   unsigned char d[4];
   size_t offset = 0;
   int linenum = 1;
-  onebyte = str[offset];
-  while (onebyte && offset < size) {
+  // Strictly size-bounded: never reads str[size] or beyond.
+  while (offset < size) {
+    onebyte = str[offset];
+    if (onebyte == 0)
+      break;
     switch (state) {
     case 0:
       state = byte0_next_state[onebyte];
@@ -78,7 +82,7 @@ static int utf8scan(const unsigned char *str, unsigned size, char *errmsg,
     case 1:
       if ((onebyte & 0xc0) == 0x80) {
         d[1] = onebyte;
-        value = (0x1c & d[0] << 6) | (((0x03 & d[0]) << 6) | (0x3f & d[1]));
+        value = ((d[0] & 0x1f) << 6) | (d[1] & 0x3f);
         if (value < 0x80 || value > 0x7ff) {
           snprintf(errmsg, sz,
                    "Invalid unicode sequence at file offset %lu around line "
@@ -145,7 +149,9 @@ static int utf8scan(const unsigned char *str, unsigned size, char *errmsg,
         d[2] = onebyte;
         value =
             ((0x000f & d[0]) << 12) | ((0x003f & d[1]) << 6) | (0x3f & d[2]);
-        if (value < 0x0800 || value > 0x0ffff) {
+        if (value < 0x0800 || value > 0x0ffff ||
+            (value >= 0xd800 && value <= 0xdfff)) {
+          /* Surrogates U+D800-U+DFFF are not valid UTF-8. */
           snprintf(errmsg, sz,
                    "Invalid unicode sequence at file offset %lu around line "
                    "%d, 3-byte sequence 0x%02X%02X%02X value U+%04X "
@@ -197,9 +203,36 @@ static int utf8scan(const unsigned char *str, unsigned size, char *errmsg,
       return -1;
     }
     ++offset;
-    onebyte = str[offset];
   }
   if (state != 0) {
+    if (offset >= size) {
+      /*
+       * The scanned sample ended in the middle of a multi-byte UTF-8
+       * sequence. Return a distinct code (-2) so callers can distinguish
+       * sample truncation (e.g. a scan window that split a character of
+       * a larger file) from genuinely invalid data. When PENDING is
+       * non-NULL it receives the number of continuation bytes still
+       * needed to complete the sequence, so a caller can read exactly
+       * that many bytes and rescan to a character boundary.
+       */
+      if (pending) {
+        switch (state) {
+        case 1:   *pending = 1; break; /* 2-byte lead, 0 of 1 seen    */
+        case 2:   *pending = 2; break; /* 3-byte lead, 0 of 2 seen    */
+        case 22:  *pending = 1; break; /* 3-byte lead, 1 of 2 seen    */
+        case 3:   *pending = 3; break; /* 4-byte lead, 0 of 3 seen    */
+        case 33:  *pending = 2; break; /* 4-byte lead, 1 of 3 seen    */
+        case 333: *pending = 1; break; /* 4-byte lead, 2 of 3 seen    */
+        default:  *pending = 0; break;
+        }
+      }
+      snprintf(errmsg, sz,
+               "Sample ends in the middle of a multi-byte UTF-8 sequence "
+               "at offset %lu (parser state %d); the input may be truncated\n",
+               offset, state);
+      return -2;
+    }
+    /* A NUL terminator ended the scan mid-sequence: genuinely invalid. */
     snprintf(errmsg, sz,
              "Excepted End of File detected at file offset %lu around line "
              "%d, parser in state %d, byte read 0x%02X\n",
@@ -236,7 +269,7 @@ int __guess_ue(const void *src, size_t size, char *errmsg, size_t er_size) {
   char utf8msg[ERR_MG_SIZE];
   char ebcdicmsg[ERR_MG_SIZE];
 
-  if (utf8scan((unsigned char *)src, size, utf8msg, sizeof(utf8msg)) == 0)
+  if (utf8scan((unsigned char *)src, size, utf8msg, sizeof(utf8msg), NULL) == 0)
     return 819;
 
   unsigned e_size = strlen_e((unsigned char *)src, size);
@@ -254,7 +287,10 @@ int __guess_ue(const void *src, size_t size, char *errmsg, size_t er_size) {
 }
 
 extern "C" void __set_ccsid_guess_buf_size(int nbytes) {
-  ccsid_guess_buf_size = nbytes;
+  // Normalize nonpositive values to the default so that both consumers
+  // (__guess_fd_ue and the untagged-file read heuristic) never see a
+  // zero/negative scan size.
+  ccsid_guess_buf_size = nbytes > 0 ? nbytes : 4096;
 }
 
 int __guess_fd_ue(int fd, char *errmsg, size_t er_size, int is_new_fd) {
@@ -264,8 +300,9 @@ int __guess_fd_ue(int fd, char *errmsg, size_t er_size, int is_new_fd) {
   }
 
   // Only guess first CCSID_GUESS_BUF_SIZE_ENVAR byte of data at most
+  // (buffer is scan size + 1 to leave room for the NUL terminator)
   if (ccsid_guess_buf_size <= 4096) {
-    char buffer[ccsid_guess_buf_size];
+    char buffer[ccsid_guess_buf_size + 1];
     ssize_t bytes = read(fd, buffer, ccsid_guess_buf_size);
     if (bytes < 0) {
       perror("guess_ue:read");
@@ -274,7 +311,7 @@ int __guess_fd_ue(int fd, char *errmsg, size_t er_size, int is_new_fd) {
     buffer[bytes] = '\0';
     return __guess_ue(buffer, (size_t)bytes, errmsg, er_size);
   } else {
-    char *buffer = (char *)malloc(ccsid_guess_buf_size);
+    char *buffer = (char *)malloc((size_t)ccsid_guess_buf_size + 1);
     ssize_t bytes = read(fd, buffer, ccsid_guess_buf_size);
     if (bytes < 0) {
       perror("guess_ue:read");
@@ -513,8 +550,16 @@ int __file_needs_conversion(int fd) {
   return 0;
 }
 
+/*
+ * Count how many of the first n bytes of buf are valid CCSID 1047 code
+ * points (per _tab_e, where 0 = valid). Used for whole-buffer scoring
+ * in __file_needs_conversion_init.
+ */
+static unsigned count_valid_1047(const unsigned char *buf, unsigned n);
+
 int __file_needs_conversion_init(const char *name, int fd) {
-  char buf[4096];
+  char *buf;
+  int scan_size;
   off_t off;
   unsigned cnt;
   if (__get_no_tag_ignore_ccsid1047()) {
@@ -533,34 +578,121 @@ int __file_needs_conversion_init(const char *name, int fd) {
   }
   if (lseek(fd, 1, SEEK_SET) == 1 && lseek(fd, 0, SEEK_SET) == 0) {
     // seekable file (real file)
-    cnt = read(fd, buf, 4096);
+    // Honor __CCSIDGUESSBUFSIZE instead of a hardcoded 4KB window
+    scan_size = ccsid_guess_buf_size > 0 ? ccsid_guess_buf_size : 4096;
+    // +3 leaves room for the UTF-8 truncation lookahead below
+    buf = (char *)malloc((size_t)scan_size + 3);
+    if (buf == 0)
+      return 0;
+    ssize_t nread = read(fd, buf, scan_size);
     off = lseek(fd, 0, SEEK_SET);
     if (off != 0) {
       // introduce an error, because of the offset is no longer valid
       close(fd);
+      free(buf);
       return 0;
     }
+    if (nread < 0) {
+      // read() failed (e.g. EINTR/EIO): do not score the buffer.
+      free(buf);
+      return 0;
+    }
+    cnt = (unsigned)nread;
     if (cnt == 0) {
+      free(buf);
       fdcache.set_attribute(fd, FD_NEEDS_CONVERSION_ATTR);
       return 1;
     }
     else {
-      int ccsid;
-      int am;
-      unsigned len = strlen_ae((unsigned char *)buf, &ccsid, cnt, &am);
-      if (ccsid == 1047 && len == cnt) {
-        if (no_tag_read_behaviour == __NO_TAG_READ_DEFAULT_WITHWARNING) {
-          if (am == 1) {
-            len = strlen(name);
-            char filename[len + 1];
-            _convert_e2a(filename, name, len);
-            __dprintf(2, "Warning: File \"%s\" is ambiguous and seems to contain "
-                      "both EBCDIC or ASCII characters\n", filename);
+      /*
+       * Decision rule:
+       *   - a NUL byte means binary data (CP1047 text never contains
+       *     X'00'): no conversion;
+       *   - valid UTF-8 means ASCII text: no conversion;
+       *   - otherwise, if at least 80% of the bytes are valid CCSID 1047
+       *     code points, treat the file as EBCDIC and convert 1047 -> 819.
+       */
+      if (memchr(buf, '\0', cnt)) {
+        /* Binary data: no conversion. */
+        free(buf);
+        return 0;
+      }
+      size_t pending = 0;
+      int urc = utf8scan((unsigned char *)buf, cnt, NULL, 0, &pending);
+      /*
+       * A dangling multi-byte tail (-2) only means the scan window
+       * split a character if the file extends beyond the scanned bytes
+       * (checked with fstat) AND the pending sequence actually
+       * completes. Read exactly the continuation bytes the pending
+       * sequence needs (at most 3) and rescan: a lead byte at the
+       * window boundary is also a common EBCDIC code point (e.g.
+       * X'C8'), and the next file byte usually proves it is not a
+       * UTF-8 lead at all. Reading exactly the needed count (rather
+       * than a fixed amount) lands the rescan on a character
+       * boundary, so it cannot itself end mid-sequence. The fstat is
+       * only performed for an incomplete tail, not on the common
+       * already-classified paths.
+       */
+      if (urc == -2 && pending > 0 && pending <= 3) {
+        struct stat sst;
+        if (fstat(fd, &sst) == 0 && (unsigned long)sst.st_size > cnt) {
+          off_t saved = lseek(fd, cnt, SEEK_SET);
+          if (saved == (off_t)cnt) {
+            /* Accumulate the lookahead: a short positive read() does
+             * not establish EOF, so keep reading until all pending
+             * bytes arrive, read() returns 0 (EOF), or it fails. */
+            size_t have = 0;
+            int read_error = 0;
+            while (have < pending) {
+              ssize_t got = read(fd, buf + cnt + have, pending - have);
+              if (got < 0 && errno == EINTR)
+                continue;
+              if (got < 0) {
+                read_error = 1;
+                break;
+              }
+              if (got == 0)
+                break; /* EOF */
+              have += (size_t)got;
+            }
+            lseek(fd, 0, SEEK_SET);
+            if (read_error) {
+              /* Lookahead failed: abandon guessing rather than risk
+               * misclassifying valid UTF-8 as EBCDIC. */
+              free(buf);
+              return 0;
+            }
+            if (have > 0 && memchr(buf + cnt, '\0', have)) {
+              /* A NUL byte in the lookahead means binary data, just
+               * like a NUL in the scanned sample: no conversion. */
+              free(buf);
+              return 0;
+            }
+            if (have == pending) {
+              /* Rescan to the character boundary; the EBCDIC scoring
+               * below still uses only the first cnt bytes. */
+              urc = utf8scan((unsigned char *)buf, cnt + have, NULL, 0, NULL);
+            }
+            /* Fewer bytes than pending (EOF): the file ends
+             * mid-sequence, so urc stays -2 and the tail is not
+             * accepted as ASCII. */
           }
+        }
+      }
+      int is_ascii = (urc == 0);
+      // Only pay for the CP1047 scan when the buffer is not valid ASCII;
+      // short-circuits the common untagged-ASCII case.
+      unsigned valid_e =
+          is_ascii ? 0 : count_valid_1047((unsigned char *)buf, cnt);
+      free(buf);
+      if (!is_ascii &&
+          (unsigned long)valid_e * 10 >= (unsigned long)cnt * 8) {
+        if (no_tag_read_behaviour == __NO_TAG_READ_DEFAULT_WITHWARNING) {
           if (name) {
-            len = strlen(name);
+            int len = strlen(name);
             char filename[len + 1];
             _convert_e2a(filename, name, len);
+            filename[len] = '\0';
             __dprintf(2, "Warning: File \"%s\" is untagged and seems to contain "
                         "EBCDIC characters\n", filename);
           } else {
@@ -570,7 +702,29 @@ int __file_needs_conversion_init(const char *name, int fd) {
         }
         fdcache.set_attribute(fd, FD_NEEDS_CONVERSION_ATTR);
         return 1;
-      }     // ccsid and len
+      }     // looks like EBCDIC
+      else if (no_tag_read_behaviour == __NO_TAG_READ_DEFAULT_WITHWARNING &&
+               valid_e * 10 >= (unsigned long)cnt * 5) {
+        /*
+         * Not classifiable: below the EBCDIC threshold but at least
+         * half the scanned bytes are valid CP1047, so the content is
+         * plausibly damaged EBCDIC or mixed. No conversion is applied;
+         * surface the ambiguity in WARN mode.
+         */
+        if (name) {
+          int len = strlen(name);
+          char filename[len + 1];
+          _convert_e2a(filename, name, len);
+          filename[len] = '\0';
+          __dprintf(2, "Warning: File \"%s\" is untagged and contains a mix of "
+                      "EBCDIC and non-EBCDIC characters; no conversion "
+                      "applied\n", filename);
+        } else {
+          __dprintf(2, "Warning: File (null) is untagged and contains a mix of "
+                      "EBCDIC and non-EBCDIC characters; no conversion "
+                      "applied\n");
+        }
+      }     // ambiguous, not converted
     }       // cnt
   }         // seekable files
   return 0; // not seekable
@@ -593,6 +747,39 @@ void __set_autocvt_on_fd_stream(int fd, unsigned short ccsid,
   }
 }
 
+/*
+ * Byte validity table for CCSID 1047 (EBCDIC), in TRTE form: 0 = valid
+ * code point (scan continues), 1 = invalid (scan stops). File-scope so it
+ * can be shared by strlen_ae()'s leading-run TRTE scan and by
+ * count_valid_1047()'s whole-buffer scoring.
+ */
+static const unsigned char _tab_e[256] __attribute__((aligned(8))) = {
+    1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0,
+    0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1,
+    1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1,
+};
+
+/*
+ * Count how many of the first n bytes of buf are valid CCSID 1047 code
+ * points (per _tab_e, where 0 = valid). Used for whole-buffer scoring
+ * in __file_needs_conversion_init.
+ */
+static unsigned count_valid_1047(const unsigned char *buf, unsigned n) {
+  unsigned valid = 0;
+  for (unsigned i = 0; i < n; i++)
+    if (_tab_e[buf[i]] == 0)
+      valid++;
+  return valid;
+}
+
 unsigned strlen_ae(const unsigned char *str, int *code_page,
                    unsigned long max_len, int *ambiguous) {
   static __tlssim<int> last_ccsid(819);
@@ -610,19 +797,6 @@ unsigned strlen_ae(const unsigned char *str, int *code_page,
       1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
       1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
       1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-  };
-  static const unsigned char _tab_e[256] __attribute__((aligned(8))) = {
-      1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1,
-      1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0,
-      1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1,
-      1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0,
-      0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1,
-      1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1,
-      1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0,
-      0, 0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1,
-      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0,
-      0, 0, 1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1,
-      0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1,
   };
   unsigned long bytes;
   unsigned long code_out;

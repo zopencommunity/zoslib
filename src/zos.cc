@@ -916,6 +916,14 @@ static notagread_t get_no_tag_read_behaviour(const char *envar) {
     return __NO_TAG_READ_V6;
   } else if (ntr && !strcmp(ntr, "STRICT")) {
     return __NO_TAG_READ_STRICT;
+  } else if (ntr && *ntr) {
+#if defined(ZOSLIB_GENERIC)
+    __dprintf(2, "Warning: unrecognized %s value \"%s\", "
+                 "valid values: AUTO, WARN, ASCII, STRICT\n", envar, ntr);
+#else
+    __dprintf(2, "Warning: unrecognized %s value \"%s\", "
+                 "valid values: AUTO, WARN, V6, STRICT\n", envar, ntr);
+#endif
   }
   return __NO_TAG_READ_DEFAULT; // default
 }

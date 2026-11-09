@@ -2726,8 +2726,28 @@ int __zinit::initialize(const zoslib_config_t &aconfig) {
   std::string ccsid;
   if (get_env_var("__STDIN_CCSID", ccsid))
     __set_autocvt_on_fd_stream(STDIN_FILENO, std::stoul(ccsid), 1, false);
-  else
-    __set_autocvt_on_fd_stream(STDIN_FILENO, 1047, 1, true);
+  else {
+    /*
+     * Historically, untagged stdin was blindly tagged as EBCDIC (1047),
+     * which mangles input when an untagged ASCII file is redirected into
+     * the program (e.g. `jq < file`). Pipes are tagged 819 by the pipe
+     * hook and ttys are skipped by the on_untagged_only path, so the
+     * blind assumption effectively only fires for redirected files.
+     * For a seekable untagged regular file, apply the untagged-file
+     * content heuristic instead: tag stdin according to what the data
+     * actually looks like.
+     */
+    struct stat st;
+    int stdin_is_untagged_file =
+        fstat(STDIN_FILENO, &st) == 0 && S_ISREG(st.st_mode) &&
+        st.st_tag.ft_txtflag == 0 && st.st_tag.ft_ccsid == 0 &&
+        lseek(STDIN_FILENO, 0, SEEK_CUR) != (off_t)-1;
+    if (stdin_is_untagged_file &&
+        !__file_needs_conversion_init(NULL, STDIN_FILENO))
+      __set_autocvt_on_fd_stream(STDIN_FILENO, 819, 1, false);
+    else
+      __set_autocvt_on_fd_stream(STDIN_FILENO, 1047, 1, true);
+  }
 
   if (get_env_var("__STDOUT_CCSID", ccsid))
     __set_autocvt_on_fd_stream(STDOUT_FILENO, std::stoul(ccsid), 1, false);

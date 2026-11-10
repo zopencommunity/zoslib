@@ -153,9 +153,15 @@ protected:
       unsigned char *buf = (unsigned char *)malloc(len);
       if (buf) {
         ssize_t n = read(fd, buf, len);
-        EXPECT_EQ(n, (ssize_t)len);
-        EXPECT_EQ(memcmp(buf, passthrough_check, len), 0)
-            << "file position or content corrupted on passthrough";
+        /* Only compare when the full buffer was read: a short or failed
+         * read leaves uninitialized bytes that must not reach memcmp. */
+        if (n == (ssize_t)len) {
+          EXPECT_EQ(memcmp(buf, passthrough_check, len), 0)
+              << "file position or content corrupted on passthrough";
+        } else {
+          ADD_FAILURE() << "short read (" << n << " of " << len
+                        << " bytes) on passthrough check";
+        }
         free(buf);
       }
     }

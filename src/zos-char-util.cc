@@ -532,18 +532,28 @@ public:
   }
 };
 
-fdAttributeCache fdcache;
+/*
+ * Construct-on-first-use accessor: the heuristic can run during process
+ * startup (the untagged-stdin probe in __zinit::initialize, before main),
+ * which may precede the construction of namespace-scope objects in other
+ * translation units. A function-local static is initialized on first use
+ * and is therefore safe against static initialization order fiascos.
+ */
+static fdAttributeCache &fdcache() {
+  static fdAttributeCache cache;
+  return cache;
+}
 #define FD_NEEDS_CONVERSION_ATTR 0x0000000000020000UL
 
 void __fd_close(int fd) { 
   if (!bfdcache_destroyed)
-    fdcache.unset_attribute(fd);
+    fdcache().unset_attribute(fd);
 }
 
 int __file_needs_conversion(int fd) {
   if (__get_no_tag_read_behaviour() == __NO_TAG_READ_STRICT)
     return 0;
-  unsigned long attr = fdcache.get_attribute(fd);
+  unsigned long attr = fdcache().get_attribute(fd);
   if (attr == FD_NEEDS_CONVERSION_ATTR) {
     return 1;
   }
@@ -573,7 +583,7 @@ int __file_needs_conversion_init(const char *name, int fd) {
   if (no_tag_read_behaviour == __NO_TAG_READ_STRICT)
     return 0;
   if (no_tag_read_behaviour == __NO_TAG_READ_V6) {
-    fdcache.set_attribute(fd, FD_NEEDS_CONVERSION_ATTR);
+    fdcache().set_attribute(fd, FD_NEEDS_CONVERSION_ATTR);
     return 1;
   }
   if (lseek(fd, 1, SEEK_SET) == 1 && lseek(fd, 0, SEEK_SET) == 0) {
@@ -600,7 +610,7 @@ int __file_needs_conversion_init(const char *name, int fd) {
     cnt = (unsigned)nread;
     if (cnt == 0) {
       free(buf);
-      fdcache.set_attribute(fd, FD_NEEDS_CONVERSION_ATTR);
+      fdcache().set_attribute(fd, FD_NEEDS_CONVERSION_ATTR);
       return 1;
     }
     else {
@@ -700,7 +710,7 @@ int __file_needs_conversion_init(const char *name, int fd) {
                         "EBCDIC characters\n");
           }
         }
-        fdcache.set_attribute(fd, FD_NEEDS_CONVERSION_ATTR);
+        fdcache().set_attribute(fd, FD_NEEDS_CONVERSION_ATTR);
         return 1;
       }     // looks like EBCDIC
       else if (no_tag_read_behaviour == __NO_TAG_READ_DEFAULT_WITHWARNING &&

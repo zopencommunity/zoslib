@@ -13,8 +13,17 @@
 #include "gtest/gtest.h"
 #include <fcntl.h>
 #include <string.h>
+#include <string>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
+
+#ifndef TEST_HELPER_PATH
+#define TEST_HELPER_PATH "stdin_probe_helper" /* relative: run from build/test */
+#endif
+#ifndef TEST_DRIVER_PATH
+#define TEST_DRIVER_PATH "stdin_probe_driver"
+#endif
 
 namespace {
 
@@ -308,6 +317,149 @@ TEST_F(UntaggedReadTest, ProbeDoesNotMoveFileOffset) {
   }
 }
 
+// --- Subprocess stdin-probe integration tests ------------------------------
+//
+// These exercise the untagged-stdin branch in __zinit::initialize,
+// which only runs at process startup: the harness forks, redirects a
+// prepared file onto fd 0 (optionally pre-positioned and with env
+// overrides), and execs the stdin_probe_helper binary (built by the
+// test CMake project, linked against the same zoslib). The helper
+// reports the ccsid the startup probe chose and the bytes it read.
+
+class StdinProbeSubprocessTest : public ::testing::Test {
+protected:
+  void SetUp() override {
+    setenv("__UNTAGGED_READ_MODE", "AUTO", 1);
+    __update_envar_settings("__UNTAGGED_READ_MODE");
+    unsetenv("__STDIN_CCSID");
+    temp_path = tmpnam(NULL);
+    ASSERT_TRUE(temp_path != NULL);
+  }
+  void TearDown() override {
+    unsetenv("__STDIN_CCSID");
+    remove(temp_path);
+  }
+
+  /* Write an untagged temp file. */
+  void WriteUntagged(const void *buf, size_t len) {
+    remove(temp_path);
+    int fd = open(temp_path, O_CREAT | O_WRONLY, 0777);
+    ASSERT_GE(fd, 0);
+    __setfdccsid(fd, 0);
+    ASSERT_EQ(write(fd, buf, len), (ssize_t)len);
+    close(fd);
+  }
+
+  /* Run the helper with temp_path on stdin at the given offset.
+   * Returns the helper's stdout line. */
+  std::string RunHelper(off_t offset, const char *mode_env = NULL,
+                        const char *ccsid_env = NULL) {
+    int pipefd[2];
+    EXPECT_EQ(pipe(pipefd), 0);
+    pid_t pid = fork();
+    if (pid == 0) {
+      dup2(pipefd[1], 1);
+      close(pipefd[0]);
+      close(pipefd[1]);
+      if (mode_env)
+        setenv("__UNTAGGED_READ_MODE", mode_env, 1);
+      if (ccsid_env)
+        setenv("__STDIN_CCSID", ccsid_env, 1);
+      /* Exec the non-zoslib delivery driver: it opens the file with
+       * the plain LE open (no zoslib hook), so the helper's process
+       * initialization receives a clean untagged stdin and makes
+       * every conversion decision itself. */
+      char offset_str[32];
+      snprintf(offset_str, sizeof(offset_str), "%ld", (long)offset);
+      execl(TEST_DRIVER_PATH, TEST_DRIVER_PATH, temp_path, offset_str,
+            TEST_HELPER_PATH, TEST_HELPER_PATH, (char *)NULL);
+      _exit(127);
+    }
+    close(pipefd[1]);
+    std::string out;
+    char chunk[256];
+    ssize_t n;
+    while ((n = read(pipefd[0], chunk, sizeof(chunk))) > 0)
+      out.append(chunk, n);
+    close(pipefd[0]);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    EXPECT_TRUE(WIFEXITED(status) && WEXITSTATUS(status) == 0)
+        << "helper exit: " << status;
+    return out;
+  }
+
+  const char *temp_path;
+};
+
+TEST_F(StdinProbeSubprocessTest, AsciiStdinReadRaw) {
+  WriteUntagged("echo ascii input\n", 17);
+  std::string out = RunHelper(0);
+  EXPECT_NE(out.find("CCSID=66355"), std::string::npos); /* 819 */
+  EXPECT_NE(out.find("65 63 68 6f"), std::string::npos); /* "echo" raw */
+}
+
+TEST_F(StdinProbeSubprocessTest, EbcdicStdinConverted) {
+  WriteUntagged(kCleanEbcdic, sizeof(kCleanEbcdic));
+  std::string out = RunHelper(0);
+  EXPECT_NE(out.find("CCSID=66583"), std::string::npos); /* 1047 */
+  EXPECT_NE(out.find("65 63 68 6f"), std::string::npos); /* "echo" conv */
+}
+
+TEST_F(StdinProbeSubprocessTest, DirtyEbcdicStdinConverted) {
+  WriteUntagged(kEbcdicWithBadByte, sizeof(kEbcdicWithBadByte));
+  std::string out = RunHelper(0);
+  EXPECT_NE(out.find("CCSID=66583"), std::string::npos);
+  EXPECT_NE(out.find("65 63 68 6f"), std::string::npos);
+}
+
+TEST_F(StdinProbeSubprocessTest, BinaryStdinReadRaw) {
+  unsigned char bin[32];
+  for (int i = 0; i < 32; i++)
+    bin[i] = (unsigned char)(i * 8); /* includes NUL bytes */
+  WriteUntagged(bin, sizeof(bin));
+  std::string out = RunHelper(0);
+  EXPECT_NE(out.find("CCSID=66355"), std::string::npos);
+  EXPECT_NE(out.find("00 08 10 18"), std::string::npos); /* raw bytes */
+}
+
+TEST_F(StdinProbeSubprocessTest, StdinOffsetPreserved) {
+  WriteUntagged("echo ascii input\n", 17);
+  /* Position stdin at 5 before exec: the startup probe must sample
+   * positionally and leave the offset at 5. */
+  std::string out = RunHelper(5);
+  EXPECT_NE(out.find("CCSID=66355"), std::string::npos);
+  EXPECT_NE(out.find("61 73 63 69"), std::string::npos); /* "asci" @5 */
+  EXPECT_EQ(out.find("65 63 68 6f"), std::string::npos); /* no replay */
+}
+
+TEST_F(StdinProbeSubprocessTest, StrictModeLeavesEbcdicRaw) {
+  WriteUntagged(kCleanEbcdic, sizeof(kCleanEbcdic));
+  std::string out = RunHelper(0, "STRICT");
+  EXPECT_NE(out.find("85 83 88 96"), std::string::npos); /* raw EBCDIC */
+}
+
+TEST_F(StdinProbeSubprocessTest, ForcedModeConvertsAscii) {
+  WriteUntagged("echo ascii input\n", 17);
+  /* V6 on standard builds, ASCII on ZOSLIB_GENERIC builds */
+#ifdef ZOSLIB_GENERIC
+  const char *forced = "ASCII";
+#else
+  const char *forced = "V6";
+#endif
+  std::string out = RunHelper(0, forced);
+  EXPECT_NE(out.find("CCSID=66583"), std::string::npos);
+  /* ASCII read through a 1047 lens: mojibake, not raw ASCII */
+  EXPECT_EQ(out.find("65 63 68 6f"), std::string::npos);
+}
+
+TEST_F(StdinProbeSubprocessTest, StdinCcsidOverrideWins) {
+  WriteUntagged("echo ascii input\n", 17);
+  std::string out = RunHelper(0, NULL, "1047");
+  EXPECT_NE(out.find("CCSID=66583"), std::string::npos);
+  EXPECT_EQ(out.find("65 63 68 6f"), std::string::npos);
+}
+
 TEST_F(UntaggedReadTest, NulInLookaheadDoesNotConvert) {
   // Regression test: a NUL byte arriving in the lookahead (past the
   // scan window) means binary data and must disqualify conversion,
@@ -430,7 +582,7 @@ TEST_F(UntaggedReadTest, AsciiStringTableWithNulsDoesNotConvert) {
   // (NULs), and ASCII text scores low on CP1047 validity (~28%):
   // must pass through unconverted.
   static const char pattern[] = "name\0version\0description\0";
-  unsigned char buf[4096];
+  unsigned char buf[4096] = {0}; /* zero-fill: deterministic input */
   for (size_t off = 0; off + sizeof(pattern) - 1 <= sizeof(buf);
        off += sizeof(pattern) - 1)
     memcpy(buf + off, pattern, sizeof(pattern) - 1);

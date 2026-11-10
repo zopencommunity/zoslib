@@ -2744,24 +2744,14 @@ int __zinit::initialize(const zoslib_config_t &aconfig) {
         lseek(STDIN_FILENO, 0, SEEK_CUR) != (off_t)-1;
     if (stdin_is_untagged_file) {
       /*
-       * The probe rewinds stdin to offset 0 to sample the content; save
-       * and restore the incoming offset so that partially consumed stdin
-       * (or an open-file description shared with a parent) is not
-       * rewound, which would replay already-read input.
+       * The probe uses positional reads and never changes the file
+       * offset, so partially consumed stdin and open-file descriptions
+       * shared with concurrent readers are unaffected.
        */
-      off_t stdin_offset = lseek(STDIN_FILENO, 0, SEEK_CUR);
-      int needs_conversion =
-          __file_needs_conversion_init(NULL, STDIN_FILENO);
-      if (stdin_offset > 0 &&
-          lseek(STDIN_FILENO, stdin_offset, SEEK_SET) < 0) {
-        /* Could not restore the offset: do not convert, the program's
-         * input position is more important than our classification. */
-        __set_autocvt_on_fd_stream(STDIN_FILENO, 819, 1, false);
-      } else if (needs_conversion) {
+      if (__file_needs_conversion_init(NULL, STDIN_FILENO))
         __set_autocvt_on_fd_stream(STDIN_FILENO, 1047, 1, false);
-      } else {
+      else
         __set_autocvt_on_fd_stream(STDIN_FILENO, 819, 1, false);
-      }
     } else {
       __set_autocvt_on_fd_stream(STDIN_FILENO, 1047, 1, true);
     }

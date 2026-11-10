@@ -586,24 +586,26 @@ int __file_needs_conversion_init(const char *name, int fd) {
     fdcache().set_attribute(fd, FD_NEEDS_CONVERSION_ATTR);
     return 1;
   }
-  if (lseek(fd, 1, SEEK_SET) == 1 && lseek(fd, 0, SEEK_SET) == 0) {
-    // seekable file (real file)
+  {
     // Honor __CCSIDGUESSBUFSIZE instead of a hardcoded 4KB window
     scan_size = ccsid_guess_buf_size > 0 ? ccsid_guess_buf_size : 4096;
     // +3 leaves room for the UTF-8 truncation lookahead below
     buf = (char *)malloc((size_t)scan_size + 3);
     if (buf == 0)
       return 0;
-    ssize_t nread = read(fd, buf, scan_size);
-    off = lseek(fd, 0, SEEK_SET);
-    if (off != 0) {
-      // introduce an error, because of the offset is no longer valid
-      close(fd);
-      free(buf);
-      return 0;
-    }
+    /*
+     * Positional read: sample from offset 0 without changing the file
+     * offset. This keeps the probe safe for descriptors whose position
+     * matters to the caller (untagged stdin, which may be partially
+     * consumed) and for open-file descriptions shared with concurrent
+     * readers (fork without exec), where seeks would replay or clobber
+     * the other reader's progress. Non-seekable descriptors (pipes,
+     * sockets) fail pread with ESPIPE and are left unconverted, as
+     * before.
+     */
+    ssize_t nread = pread(fd, buf, scan_size, 0);
     if (nread < 0) {
-      // read() failed (e.g. EINTR/EIO): do not score the buffer.
+      // read() failed (e.g. EINTR/EIO, or non-seekable fd): do not score.
       free(buf);
       return 0;
     }
@@ -646,47 +648,48 @@ int __file_needs_conversion_init(const char *name, int fd) {
       if (urc == -2 && pending > 0 && pending <= 3) {
         struct stat sst;
         if (fstat(fd, &sst) == 0 && (unsigned long)sst.st_size > cnt) {
-          off_t saved = lseek(fd, cnt, SEEK_SET);
-          if (saved == (off_t)cnt) {
-            /* Accumulate the lookahead: a short positive read() does
-             * not establish EOF, so keep reading until all pending
-             * bytes arrive, read() returns 0 (EOF), or it fails. */
-            size_t have = 0;
-            int read_error = 0;
-            while (have < pending) {
-              ssize_t got = read(fd, buf + cnt + have, pending - have);
-              if (got < 0 && errno == EINTR)
-                continue;
-              if (got < 0) {
-                read_error = 1;
-                break;
-              }
-              if (got == 0)
-                break; /* EOF */
-              have += (size_t)got;
+          /*
+           * Accumulate the lookahead with positional reads at offset
+           * cnt: a short positive read does not establish EOF, so keep
+           * reading until all pending bytes arrive, pread returns 0
+           * (EOF), or it fails. pread leaves the file offset untouched,
+           * so shared open-file descriptions are not disturbed.
+           */
+          size_t have = 0;
+          int read_error = 0;
+          while (have < pending) {
+            ssize_t got =
+                pread(fd, buf + cnt + have, pending - have, cnt + have);
+            if (got < 0 && errno == EINTR)
+              continue;
+            if (got < 0) {
+              read_error = 1;
+              break;
             }
-            lseek(fd, 0, SEEK_SET);
-            if (read_error) {
-              /* Lookahead failed: abandon guessing rather than risk
-               * misclassifying valid UTF-8 as EBCDIC. */
-              free(buf);
-              return 0;
-            }
-            if (have > 0 && memchr(buf + cnt, '\0', have)) {
-              /* A NUL byte in the lookahead means binary data, just
-               * like a NUL in the scanned sample: no conversion. */
-              free(buf);
-              return 0;
-            }
-            if (have == pending) {
-              /* Rescan to the character boundary; the EBCDIC scoring
-               * below still uses only the first cnt bytes. */
-              urc = utf8scan((unsigned char *)buf, cnt + have, NULL, 0, NULL);
-            }
-            /* Fewer bytes than pending (EOF): the file ends
-             * mid-sequence, so urc stays -2 and the tail is not
-             * accepted as ASCII. */
+            if (got == 0)
+              break; /* EOF */
+            have += (size_t)got;
           }
+          if (read_error) {
+            /* Lookahead failed: abandon guessing rather than risk
+             * misclassifying valid UTF-8 as EBCDIC. */
+            free(buf);
+            return 0;
+          }
+          if (have > 0 && memchr(buf + cnt, '\0', have)) {
+            /* A NUL byte in the lookahead means binary data, just
+             * like a NUL in the scanned sample: no conversion. */
+            free(buf);
+            return 0;
+          }
+          if (have == pending) {
+            /* Rescan to the character boundary; the EBCDIC scoring
+             * below still uses only the first cnt bytes. */
+            urc = utf8scan((unsigned char *)buf, cnt + have, NULL, 0, NULL);
+          }
+          /* Fewer bytes than pending (EOF): the file ends
+           * mid-sequence, so urc stays -2 and the tail is not
+           * accepted as ASCII. */
         }
       }
       int is_ascii = (urc == 0);
@@ -736,8 +739,8 @@ int __file_needs_conversion_init(const char *name, int fd) {
         }
       }     // ambiguous, not converted
     }       // cnt
-  }         // seekable files
-  return 0; // not seekable
+  }         // sample read
+  return 0; // unreadable or non-seekable
 }
 
 void __set_autocvt_on_fd_stream(int fd, unsigned short ccsid,

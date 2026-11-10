@@ -270,6 +270,44 @@ TEST_F(UntaggedReadTest, ShortLookaheadEofEbcdicStillConverts) {
   close(fd);
 }
 
+TEST_F(UntaggedReadTest, ProbeDoesNotMoveFileOffset) {
+  // Regression test: the heuristic must use positional reads so the
+  // file offset is never changed. This is what makes the probe safe
+  // for partially consumed stdin and for open-file descriptions
+  // shared with concurrent readers (fork without exec): no seeks
+  // means no replayed input and no clobbered progress.
+  struct {
+    const char *name;
+    const unsigned char *data;
+    size_t len;
+  } cases[] = {
+      {"ascii", (const unsigned char *)"echo ascii content\n", 18},
+      {"ebcdic", kCleanEbcdic, sizeof(kCleanEbcdic)},
+      {"dirty", kEbcdicWithBadByte, sizeof(kEbcdicWithBadByte)},
+  };
+  for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    long ccsid = -1;
+    int fd = SetupFile(cases[i].data, cases[i].len, &ccsid);
+    ASSERT_GE(fd, 0) << cases[i].name;
+    close(fd);
+    /* Re-open directly (not through the hook) and position at 4. */
+    remove(temp_path);
+    fd = open(temp_path, O_CREAT | O_WRONLY, 0777);
+    ASSERT_GE(fd, 0);
+    __setfdccsid(fd, 0);
+    ASSERT_EQ(write(fd, cases[i].data, cases[i].len), (ssize_t)cases[i].len);
+    close(fd);
+    fd = open(temp_path, O_RDONLY);
+    ASSERT_GE(fd, 0) << cases[i].name;
+    ASSERT_EQ(lseek(fd, 4, SEEK_SET), (off_t)4);
+    int rc = __file_needs_conversion_init(NULL, fd);
+    EXPECT_TRUE(rc == 0 || rc == 1) << cases[i].name;
+    EXPECT_EQ(lseek(fd, 0, SEEK_CUR), (off_t)4)
+        << "probe moved the file offset for " << cases[i].name;
+    close(fd);
+  }
+}
+
 TEST_F(UntaggedReadTest, NulInLookaheadDoesNotConvert) {
   // Regression test: a NUL byte arriving in the lookahead (past the
   // scan window) means binary data and must disqualify conversion,

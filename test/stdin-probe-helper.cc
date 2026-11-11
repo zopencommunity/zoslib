@@ -13,6 +13,19 @@
 #include <cstring>
 #include "zos.h" /* __getfdccsid: also forces the zoslib import */
 
+#ifdef ZOSLIB_HELPER_SELF_INIT
+/*
+ * Default zoslib builds (ENABLE_STATIC_INIT off) compile out the
+ * library's own initializer, so linking zoslib alone does not run
+ * the startup probe. Instantiate the initializer here so the probe
+ * executes exactly once in this process; when the library
+ * self-initializes, this object is not compiled and the library's
+ * own constructor does the work.
+ */
+#include "zos-base.h"
+static __init_zoslib helper_zoslib_init;
+#endif
+
 int main() {
   char out[512];
   unsigned char buf[64];

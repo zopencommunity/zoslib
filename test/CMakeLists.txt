@@ -29,6 +29,12 @@ target_include_directories(stdin_probe_helper PRIVATE ${CMAKE_CURRENT_SOURCE_DIR
 # conversion becomes a no-op).
 target_compile_options(stdin_probe_helper PRIVATE ${zoslib_cflags})
 target_compile_definitions(stdin_probe_helper PRIVATE _AE_BIMODAL=1 _ALL_SOURCE)
+# When the library does not self-initialize (ENABLE_STATIC_INIT off),
+# the helper must instantiate the zoslib initializer itself so the
+# startup probe runs; otherwise nothing exercises it.
+if(NOT ENABLE_STATIC_INIT)
+  target_compile_definitions(stdin_probe_helper PRIVATE ZOSLIB_HELPER_SELF_INIT)
+endif()
 target_link_libraries(stdin_probe_helper ${PROJECT_BINARY_DIR}/lib/libzoslib.x)
 # The sidedeck does not establish the dependency: make the library a
 # build-order dependency so parallel/clean builds link correctly.

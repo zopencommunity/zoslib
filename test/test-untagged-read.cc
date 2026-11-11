@@ -24,6 +24,9 @@
 #ifndef TEST_DRIVER_PATH
 #define TEST_DRIVER_PATH "stdin_probe_driver"
 #endif
+#ifndef TEST_LIB_DIR
+#define TEST_LIB_DIR "../lib"
+#endif
 
 namespace {
 
@@ -365,6 +368,13 @@ protected:
         setenv("__UNTAGGED_READ_MODE", mode_env, 1);
       if (ccsid_env)
         setenv("__STDIN_CCSID", ccsid_env, 1);
+      /* The exec'd helper dynamically loads libzoslib.so; make sure
+       * the build's library is found even when the runner itself is
+       * the static cctest_a invoked without a configured LIBPATH. */
+      const char *oldlp = getenv("LIBPATH");
+      std::string lp = std::string(TEST_LIB_DIR) +
+                       (oldlp ? ":" + std::string(oldlp) : "");
+      setenv("LIBPATH", lp.c_str(), 1);
       /* Exec the non-zoslib delivery driver: it opens the file with
        * the plain LE open (no zoslib hook), so the helper's process
        * initialization receives a clean untagged stdin and makes

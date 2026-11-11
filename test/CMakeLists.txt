@@ -27,18 +27,27 @@ target_include_directories(stdin_probe_helper PRIVATE ${CMAKE_CURRENT_SOURCE_DIR
 # before the stdin probe arms conversion (without bimodal, the
 # SETCVTON program-ccsid defaults to ThliCcsid=1047 and the armed
 # conversion becomes a no-op).
-target_compile_options(stdin_probe_helper PRIVATE
-    -m64 -march=z13 -mzos-target=zosv2r5 -fno-short-enums
-    -fzos-le-char-mode=ascii -fgnu-keywords)
+target_compile_options(stdin_probe_helper PRIVATE ${zoslib_cflags})
 target_compile_definitions(stdin_probe_helper PRIVATE _AE_BIMODAL=1 _ALL_SOURCE)
 target_link_libraries(stdin_probe_helper ${PROJECT_BINARY_DIR}/lib/libzoslib.x)
+# The sidedeck does not establish the dependency: make the library a
+# build-order dependency so parallel/clean builds link correctly.
+add_dependencies(stdin_probe_helper zoslib)
 
-# Delivery driver: plain LE open (no zoslib), so the helper receives
-# a clean untagged stdin.
+# Delivery driver: plain LE open (no zoslib linkage), so the helper
+# receives a clean untagged stdin.
 add_executable(stdin_probe_driver stdin-probe-driver.c)
-target_compile_options(stdin_probe_driver PRIVATE
-    -m64 -mzos-target=zosv2r5 -fno-short-enums -fzos-le-char-mode=ascii)
+target_compile_options(stdin_probe_driver PRIVATE ${zoslib_cflags})
 
-target_compile_definitions(cctest PRIVATE
-    TEST_HELPER_PATH="${CMAKE_CURRENT_BINARY_DIR}/stdin_probe_helper"
-    TEST_DRIVER_PATH="${CMAKE_CURRENT_BINARY_DIR}/stdin_probe_driver")
+# Both test runners compile the subprocess tests: give each the
+# executables' absolute paths and the build library directory (the
+# exec'd helper dynamically loads libzoslib.so, so the test prepends
+# the build lib directory to LIBPATH, covering the static cctest_a
+# runner invoked without a configured LIBPATH).
+foreach(runner cctest cctest_a)
+  target_compile_definitions(${runner} PRIVATE
+      TEST_HELPER_PATH="${CMAKE_CURRENT_BINARY_DIR}/stdin_probe_helper"
+      TEST_DRIVER_PATH="${CMAKE_CURRENT_BINARY_DIR}/stdin_probe_driver"
+      TEST_LIB_DIR="${PROJECT_BINARY_DIR}/lib")
+  add_dependencies(${runner} stdin_probe_helper stdin_probe_driver)
+endforeach()

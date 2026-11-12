@@ -40,6 +40,7 @@
         'src/zos-char-util.cc',
         'src/zos-getentropy.cc',
         'src/zos-io.cc',
+        'src/zos-acl.c',
         'src/zos-mount.c',
         'src/zos-semaphore.cc',
         'src/zos-spawn.cc',

@@ -11,6 +11,7 @@ set(libsrc
   zos-char-util.cc
   zos-getentropy.cc
   zos-io.cc
+  zos-acl.c
   zos-locale.cc
   zos-semaphore.cc
   zos-spawn.cc

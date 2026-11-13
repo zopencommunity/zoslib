@@ -25,12 +25,13 @@ namespace {
 
 // Number of extended ACL entries in the working storage of a handle.
 static int aclEntryCount(acl_t acl) {
-  return acl->lacl_data.aclb_entry.acl_entnum;
+  return acl->zh_le->lacl_data.aclb_entry.acl_entnum;
 }
 
 // Extended ACL entry "i" of a handle.
 static struct ACL_entry *aclEntry(acl_t acl, int i) {
-  return (struct ACL_entry *)((char *)&acl->lacl_data + sizeof(struct ACL_buf)) + i;
+  return (struct ACL_entry *)((char *)&acl->zh_le->lacl_data +
+                              sizeof(struct ACL_buf)) + i;
 }
 
 // An ACL entry qualifier: a user or group id.
@@ -756,8 +757,8 @@ TEST_F(AclTest, GetFdMatchesGetFile) {
   EXPECT_EQ(aclEntryCount(by_path), aclEntryCount(by_fd));
   EXPECT_EQ(aclEntry(by_fd, 0)->acle_id, aclEntry(by_path, 0)->acle_id);
   for (int i = 0; i < 3; i++)
-    EXPECT_EQ(*(unsigned char *)&by_fd->lacl_base_entry[i].acle_value,
-              *(unsigned char *)&by_path->lacl_base_entry[i].acle_value);
+    EXPECT_EQ(*(unsigned char *)&by_fd->zh_le->lacl_base_entry[i].acle_value,
+              *(unsigned char *)&by_path->zh_le->lacl_base_entry[i].acle_value);
   EXPECT_EQ(acl_free(by_path), 0);
   EXPECT_EQ(acl_free(by_fd), 0);
 }
@@ -772,7 +773,7 @@ TEST_F(AclTest, GetFdNoEntries) {
   close(fd);
   ASSERT_NE(acl, (acl_t)NULL);
   EXPECT_EQ(aclEntryCount(acl), 0);
-  EXPECT_EQ(acl->lacl_base, 3);
+  EXPECT_EQ(acl->zh_le->lacl_base, 3);
   EXPECT_EQ(acl_free(acl), 0);
 }
 
@@ -891,7 +892,7 @@ TEST_F(AclTest, FromTextOctalAndNames) {
   acl_t acl = acl_from_text("user::6,group::4,other::4");
   ASSERT_NE(acl, (acl_t)NULL);
   EXPECT_EQ(aclEntryCount(acl), 0);
-  EXPECT_EQ(acl->lacl_base, 3);
+  EXPECT_EQ(acl->zh_le->lacl_base, 3);
   EXPECT_EQ(acl_free(acl), 0);
 
   acl = acl_from_text("user::rw-\ngroup::r--\nother::r--\n");
@@ -956,8 +957,8 @@ TEST_F(AclTest, ToTextRoundTrip) {
   EXPECT_EQ(aclEntry(parsed, 0)->acle_value.aclp_write, 1);
   EXPECT_EQ(aclEntry(parsed, 0)->acle_value.aclp_execute, 1);
   for (int i = 0; i < 3; i++)
-    EXPECT_EQ(*(unsigned char *)&parsed->lacl_base_entry[i].acle_value,
-              *(unsigned char *)&acl->lacl_base_entry[i].acle_value);
+    EXPECT_EQ(*(unsigned char *)&parsed->zh_le->lacl_base_entry[i].acle_value,
+              *(unsigned char *)&acl->zh_le->lacl_base_entry[i].acle_value);
   EXPECT_EQ(acl_free(parsed), 0);
 }
 
@@ -996,6 +997,93 @@ TEST_F(AclTest, DeleteDefFile) {
   errno = 0;
   EXPECT_EQ(acl_delete_def_file(NULL), -1);
   EXPECT_EQ(errno, EINVAL);
+}
+
+// The entry iteration covers the base entries first, then the extended
+// ones, with POSIX tag types, permission sets and qualifiers.
+TEST_F(AclTest, EntryIteration) {
+  char text[256];
+  snprintf(text, sizeof(text), "user::rw-,group::r--,other::r--,user:%ld:r-x",
+           (long)getuid());
+  acl_t acl = acl_from_text(text);
+  ASSERT_NE(acl, (acl_t)NULL);
+
+  acl_entry_t entry;
+  int rc = acl_get_entry(acl, ACL_FIRST_ENTRY, &entry);
+  ASSERT_EQ(rc, 1);
+  int count = 0;
+  int tags[8];
+  while (rc == 1) {
+    ASSERT_LT(count, 8);
+    tags[count++] = acl_get_tag_type(entry);
+    rc = acl_get_entry(acl, ACL_NEXT_ENTRY, &entry);
+  }
+  EXPECT_EQ(rc, 0); // exhausted
+  EXPECT_EQ(count, 4);
+  EXPECT_EQ(tags[0], ACL_USER_OBJ);
+  EXPECT_EQ(tags[1], ACL_GROUP_OBJ);
+  EXPECT_EQ(tags[2], ACL_OTHER);
+  EXPECT_EQ(tags[3], ACL_USER);
+
+  // Restart and inspect the extended entry.
+  ASSERT_EQ(acl_get_entry(acl, ACL_FIRST_ENTRY, &entry), 1);
+  ASSERT_EQ(acl_get_entry(acl, ACL_NEXT_ENTRY, &entry), 1);
+  ASSERT_EQ(acl_get_entry(acl, ACL_NEXT_ENTRY, &entry), 1);
+  ASSERT_EQ(acl_get_entry(acl, ACL_NEXT_ENTRY, &entry), 1);
+  EXPECT_EQ(acl_get_tag_type(entry), ACL_USER);
+
+  acl_permset_t perms;
+  EXPECT_EQ(acl_get_permset(entry, &perms), 0);
+  EXPECT_EQ(acl_get_perm(perms, ACL_READ), 1);
+  EXPECT_EQ(acl_get_perm(perms, ACL_WRITE), 0);
+  EXPECT_EQ(acl_get_perm(perms, ACL_EXECUTE), 1);
+
+  uid_t *qual = (uid_t *)acl_get_qualifier(entry);
+  ASSERT_NE(qual, (uid_t *)NULL);
+  EXPECT_EQ(*qual, getuid());
+  EXPECT_EQ(acl_free(qual), 0); // released through acl_free()
+
+  // The base entries have no qualifier.
+  ASSERT_EQ(acl_get_entry(acl, ACL_FIRST_ENTRY, &entry), 1);
+  errno = 0;
+  EXPECT_EQ(acl_get_qualifier(entry), (void *)NULL);
+  EXPECT_EQ(errno, EINVAL);
+  EXPECT_EQ(acl_free(acl), 0);
+}
+
+TEST_F(AclTest, EntryInvalidArguments) {
+  acl_entry_t entry;
+  acl_t acl = acl_get_file(src_path_, ACL_TYPE_ACCESS);
+  ASSERT_NE(acl, (acl_t)NULL);
+
+  errno = 0;
+  EXPECT_EQ(acl_get_entry(NULL, ACL_FIRST_ENTRY, &entry), -1);
+  EXPECT_EQ(errno, EINVAL);
+  errno = 0;
+  EXPECT_EQ(acl_get_entry(acl, 42, &entry), -1);
+  EXPECT_EQ(errno, EINVAL);
+  EXPECT_EQ(acl_get_tag_type(NULL), -1);
+  EXPECT_EQ(acl_free(acl), 0);
+}
+
+// The permission set of the base entries reflects the mode.
+TEST_F(AclTest, PermsetOfBaseEntries) {
+  ASSERT_EQ(chmod(src_path_, 0640), 0);
+  acl_t acl = acl_get_file(src_path_, ACL_TYPE_ACCESS);
+  ASSERT_NE(acl, (acl_t)NULL);
+
+  acl_entry_t entry;
+  ASSERT_EQ(acl_get_entry(acl, ACL_FIRST_ENTRY, &entry), 1);
+  acl_permset_t perms;
+  ASSERT_EQ(acl_get_permset(entry, &perms), 0);
+  EXPECT_EQ(acl_get_perm(perms, ACL_READ), 1);
+  EXPECT_EQ(acl_get_perm(perms, ACL_WRITE), 1);
+  EXPECT_EQ(acl_get_perm(perms, ACL_EXECUTE), 0);
+
+  errno = 0;
+  EXPECT_EQ(acl_get_perm(perms, 0777), -1); // not a single permission
+  EXPECT_EQ(errno, EINVAL);
+  EXPECT_EQ(acl_free(acl), 0);
 }
 
 // A file that does not exist is an error.

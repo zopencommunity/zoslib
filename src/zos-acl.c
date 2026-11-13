@@ -44,6 +44,8 @@
 // digit.
 #define ACL_PERM(e) (*(unsigned char *)&(e)->acle_value & 07)
 
+
+
 // Entry points of the z/OS LE ACL library.
 extern lacl_t __acl_init_le(int count) asm("@@LINIT");
 extern int __acl_get_file_le(const char *path_p, short type_d, lacl_t acl_d,
@@ -61,6 +63,51 @@ extern int __le_acl_from_text(const char *buf_p, short op_type, acl_all_t set_pt
                               char **ret) asm("@@LFTEXT");
 extern char *__le_acl_to_text(const lacl_t acl_d, ssize_t *len_p, short type_d,
                               char delim) asm("@@LTTEXT");
+
+// Every object released through acl_free() — a handle or a qualifier —
+// carries this header in front of the pointer the caller holds, so
+// that acl_free() can tell them apart.  The size_t keeps the payload
+// aligned.
+struct zos_acl_obj_header {
+    size_t oh_tag;
+};
+#define ZOS_ACL_HANDLE_TAG    ((size_t)0x5A434C01)
+#define ZOS_ACL_QUALIFIER_TAG ((size_t)0x5A434C02)
+
+// Wraps LE working storage into a published handle with the entry
+// descriptors; takes ownership of "le" (freed on failure).
+static struct zos_acl_handle *zos_acl_publish(lacl_t le) {
+  if (le == NULL)
+    return NULL;
+  int n = 3 + le->lacl_data.aclb_entry.acl_entnum;
+  char *mem =
+      (char *)malloc(sizeof(struct zos_acl_obj_header) +
+                     sizeof(struct zos_acl_handle) +
+                     (size_t)(n - 1) * sizeof(struct zos_acl_entry_desc));
+  if (mem == NULL) {
+    __acl_free_le(le);
+    return NULL;
+  }
+  ((struct zos_acl_obj_header *)mem)->oh_tag = ZOS_ACL_HANDLE_TAG;
+  struct zos_acl_handle *h =
+      (struct zos_acl_handle *)(mem + sizeof(struct zos_acl_obj_header));
+  h->zh_le = le;
+  h->zh_cursor = 0;
+  for (int i = 0; i < n; i++) {
+    h->zh_desc[i].ed_acl = h;
+    h->zh_desc[i].ed_index = i;
+  }
+  return h;
+}
+
+// The real entry an entry descriptor refers to.
+static struct ACL_entry *zos_acl_entry_real(struct zos_acl_entry_desc *entry) {
+  lacl_t le = entry->ed_acl->zh_le;
+  if (entry->ed_index < 3)
+    return (struct ACL_entry *)&le->lacl_base_entry[entry->ed_index];
+  return (struct ACL_entry *)((char *)&le->lacl_data + sizeof(struct ACL_buf))
+         + (entry->ed_index - 3);
+}
 
 // Upper bound of ACL entries to retrieve; RACF and the file system
 // regulate the real limit.
@@ -111,7 +158,7 @@ static int zos_acl_initial_count = 16;
 
 __Z_EXPORT void __acl_set_initial_count(int count) { zos_acl_initial_count = count; }
 
-lacl_t __acl_get_file(const char *path_p, short type) {
+struct zos_acl_handle *__acl_get_file(const char *path_p, short type) {
   if (path_p == NULL || type != ACL_ACCESS) {
     errno = EINVAL; // z/OS has no default ACLs
     return NULL;
@@ -139,7 +186,7 @@ lacl_t __acl_get_file(const char *path_p, short type) {
         __acl_free_le(acl);
         return NULL;
       }
-      return acl; // possibly with zero extended entries
+      return zos_acl_publish(acl); // possibly with zero extended entries
     }
 
     if (errno == ENOENT) {
@@ -162,7 +209,7 @@ lacl_t __acl_get_file(const char *path_p, short type) {
               __acl_free_le(acl);
               return NULL;
             }
-            return acl;
+            return zos_acl_publish(acl);
           }
           // Grow the storage like the main loop: the replacement may
           // have more entries than the initial size could hold.
@@ -186,7 +233,7 @@ lacl_t __acl_get_file(const char *path_p, short type) {
         if (pinned_errno == ENOENT) {
           // No extended entries on the pinned inode.
           if (have_fst)
-            return zos_acl_synthesize(fst.st_mode);
+            return zos_acl_publish(zos_acl_synthesize(fst.st_mode));
           return NULL;
         }
         // A real retrieval error (E2BIG, ...), not "no entries":
@@ -200,7 +247,7 @@ lacl_t __acl_get_file(const char *path_p, short type) {
       __acl_free_le(acl);
       struct stat st;
       if (stat(path_p, &st) == 0)
-        return zos_acl_synthesize(st.st_mode);
+        return zos_acl_publish(zos_acl_synthesize(st.st_mode));
       return NULL; // no such file
     }
 
@@ -478,21 +525,22 @@ static int zos_acl_set_nonempty_fd(int fd, lacl_t acl) {
   return rc;
 }
 
-int __acl_set_file(const char *path_p, short type, lacl_t acl) {
-  if (path_p == NULL || type != ACL_ACCESS) {
+int __acl_set_file(const char *path_p, short type, struct zos_acl_handle *acl) {
+  if (path_p == NULL || type != ACL_ACCESS || acl == NULL) {
+    if (acl == NULL && path_p != NULL && type == ACL_ACCESS)
+      return 0; // no ACL to apply
     errno = EINVAL;
     return -1;
   }
-  if (acl == NULL)
-    return 0;
+  lacl_t le = acl->zh_le;
 
   char epath[1024];
   if (zos_acl_path_a2e(path_p, epath, sizeof(epath)) != 0)
     return -1;
 
-  struct ACL *hdr = &acl->lacl_data.aclb_entry;
+  struct ACL *hdr = &le->lacl_data.aclb_entry;
   int empty = hdr->acl_entnum <= 0;
-  if (empty && acl->lacl_base != 3)
+  if (empty && le->lacl_base != 3)
     return __acl_delete_file_le(epath, ACL_ACCESS);
 
   // O_NONBLOCK keeps the open from blocking on a FIFO, O_NOCTTY keeps
@@ -532,34 +580,35 @@ int __acl_set_file(const char *path_p, short type, lacl_t acl) {
     }
     mode_t base = 0;
     for (int i = 0; i < 3; i++)
-      base = (base << 3) | ACL_PERM(&acl->lacl_base_entry[i]);
+      base = (base << 3) | ACL_PERM(&le->lacl_base_entry[i]);
     return chmod(path_p, base);
   }
 
-  int rc = empty ? zos_acl_set_empty_fd(fd, acl)
-                 : zos_acl_set_nonempty_fd(fd, acl);
+  int rc = empty ? zos_acl_set_empty_fd(fd, le)
+                 : zos_acl_set_nonempty_fd(fd, le);
   close(fd);
   return rc;
 }
 
-int __acl_set_fd(int fd, short type, lacl_t acl) {
-  if (fd < 0 || type != ACL_ACCESS) {
+int __acl_set_fd(int fd, short type, struct zos_acl_handle *acl) {
+  if (fd < 0 || type != ACL_ACCESS || acl == NULL) {
+    if (acl == NULL && fd >= 0 && type == ACL_ACCESS)
+      return 0; // no ACL to apply
     errno = EINVAL;
     return -1;
   }
-  if (acl == NULL)
-    return 0;
+  lacl_t le = acl->zh_le;
 
   // The descriptor belongs to the caller and is not closed.
-  if (acl->lacl_data.aclb_entry.acl_entnum <= 0) {
-    if (acl->lacl_base != 3)
+  if (le->lacl_data.aclb_entry.acl_entnum <= 0) {
+    if (le->lacl_base != 3)
       return __acl_delete_fd_le(fd, ACL_ACCESS);
-    return zos_acl_set_empty_fd(fd, acl);
+    return zos_acl_set_empty_fd(fd, le);
   }
-  return zos_acl_set_nonempty_fd(fd, acl);
+  return zos_acl_set_nonempty_fd(fd, le);
 }
 
-lacl_t __acl_get_fd(int fd, short type) {
+struct zos_acl_handle *__acl_get_fd(int fd, short type) {
   if (fd < 0 || type != ACL_ACCESS) {
     errno = EINVAL;
     return NULL;
@@ -581,7 +630,7 @@ lacl_t __acl_get_fd(int fd, short type) {
         __acl_free_le(acl);
         return NULL;
       }
-      return acl; // possibly with zero extended entries
+      return zos_acl_publish(acl); // possibly with zero extended entries
     }
 
     if (errno == ENOENT) {
@@ -591,7 +640,7 @@ lacl_t __acl_get_fd(int fd, short type) {
       int have_fst = fstat(fd, &fst) == 0;
       __acl_free_le(acl);
       if (have_fst)
-        return zos_acl_synthesize(fst.st_mode);
+        return zos_acl_publish(zos_acl_synthesize(fst.st_mode));
       return NULL;
     }
 
@@ -650,14 +699,15 @@ lacl_t __acl_from_text(const char *buf_p) {
     errno = EINVAL;
     return NULL;
   }
-  return acl;
+  return zos_acl_publish(acl);
 }
 
-char *__acl_to_text(lacl_t acl, ssize_t *len_p) {
+char *__acl_to_text(struct zos_acl_handle *acl, ssize_t *len_p) {
   if (acl == NULL) {
     errno = EINVAL;
     return NULL;
   }
+  lacl_t le = acl->zh_le;
 
   // The LE acl_to_text() emits the extended entries only (and returns
   // NULL for a handle without any); the base entries are rendered here
@@ -667,14 +717,14 @@ char *__acl_to_text(lacl_t acl, ssize_t *len_p) {
   int off = 0;
   static const char *names[3] = {"user", "group", "other"};
   for (int i = 0; i < 3; i++) {
-    int perm = ACL_PERM(&acl->lacl_base_entry[i]);
+    int perm = ACL_PERM(&le->lacl_base_entry[i]);
     off += snprintf(base + off, sizeof(base) - off, "%s%s::%c%c%c",
                     i > 0 ? "," : "", names[i], (perm & 04) ? 'r' : '-',
                     (perm & 02) ? 'w' : '-', (perm & 01) ? 'x' : '-');
   }
 
   ssize_t ext_len = 0;
-  char *ext = __le_acl_to_text(acl, &ext_len, ACL_ACCESS, (char)0x6B);
+  char *ext = __le_acl_to_text(le, &ext_len, ACL_ACCESS, (char)0x6B);
   char *etext = NULL;
   if (ext != NULL) {
     etext = (char *)malloc(ext_len + 1);
@@ -726,5 +776,82 @@ int __acl_free(void *obj_p) {
     errno = EINVAL;
     return -1;
   }
-  return __acl_free_le((lacl_t)obj_p);
+  size_t tag = ((struct zos_acl_obj_header *)obj_p)[-1].oh_tag;
+  if (tag == ZOS_ACL_HANDLE_TAG) {
+    struct zos_acl_handle *h = (struct zos_acl_handle *)obj_p;
+    int rc = __acl_free_le(h->zh_le);
+    free((char *)obj_p - sizeof(struct zos_acl_obj_header));
+    return rc;
+  }
+  if (tag == ZOS_ACL_QUALIFIER_TAG) {
+    free((char *)obj_p - sizeof(struct zos_acl_obj_header));
+    return 0;
+  }
+  errno = EINVAL; // not an object of this API
+  return -1;
+}
+
+int __acl_get_entry(struct zos_acl_handle *acl, int entry_id,
+                    struct zos_acl_entry_desc **entry_p) {
+  if (acl == NULL || entry_p == NULL ||
+      (entry_id != ACL_FIRST_ENTRY && entry_id != ACL_NEXT_ENTRY)) {
+    errno = EINVAL;
+    return -1;
+  }
+  int n = 3 + acl->zh_le->lacl_data.aclb_entry.acl_entnum;
+  if (entry_id == ACL_FIRST_ENTRY)
+    acl->zh_cursor = 0;
+  if (acl->zh_cursor >= n) {
+    *entry_p = NULL;
+    return 0; // no more entries
+  }
+  *entry_p = &acl->zh_desc[acl->zh_cursor++];
+  return 1;
+}
+
+int __acl_get_tag_type(struct zos_acl_entry_desc *entry_d) {
+  if (entry_d == NULL) {
+    errno = EINVAL;
+    return -1;
+  }
+  if (entry_d->ed_index < 3) {
+    // The base entries, by position: owner, group, other.
+    static const int tags[3] = {ACL_USER_OBJ, ACL_GROUP_OBJ, ACL_OTHER};
+    return tags[entry_d->ed_index];
+  }
+  return zos_acl_entry_real(entry_d)->acle_type == ACL_USER ? ACL_USER : ACL_GROUP;
+}
+
+int __acl_get_permset(struct zos_acl_entry_desc *entry_d,
+                      struct ACL_perm **permset_p) {
+  if (entry_d == NULL || permset_p == NULL) {
+    errno = EINVAL;
+    return -1;
+  }
+  *permset_p = &zos_acl_entry_real(entry_d)->acle_value;
+  return 0;
+}
+
+int __acl_get_perm(struct ACL_perm *permset_d, int perm) {
+  if (permset_d == NULL ||
+      (perm & ~(ACL_READ | ACL_WRITE | ACL_EXECUTE)) != 0 || perm == 0) {
+    errno = EINVAL;
+    return -1;
+  }
+  return (*(unsigned char *)permset_d & perm) == perm ? 1 : 0;
+}
+
+void *__acl_get_qualifier(struct zos_acl_entry_desc *entry_d) {
+  if (entry_d == NULL || entry_d->ed_index < 3) {
+    errno = EINVAL; // the base entries have no qualifier
+    return NULL;
+  }
+  char *mem = (char *)malloc(sizeof(struct zos_acl_obj_header) +
+                             sizeof(uid_t));
+  if (mem == NULL)
+    return NULL;
+  ((struct zos_acl_obj_header *)mem)->oh_tag = ZOS_ACL_QUALIFIER_TAG;
+  uid_t *id = (uid_t *)(mem + sizeof(struct zos_acl_obj_header));
+  *id = (uid_t)zos_acl_entry_real(entry_d)->acle_id;
+  return id;
 }

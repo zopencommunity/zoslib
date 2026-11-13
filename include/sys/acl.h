@@ -32,6 +32,8 @@
 #define _OPEN_SYS 1
 #endif
 
+
+
 #if defined(ZOSLIB_OVERRIDE_CLIB) || defined(ZOSLIB_OVERRIDE_CLIB_ACL)
 
 // Hide the declarations of the z/OS acl_* functions, they have
@@ -92,12 +94,63 @@
 #undef acl_to_text
 #undef acl_sort
 
+// The system header typedefs acl_entry_t as "struct ACL_entry *"; the
+// POSIX entry API needs descriptors that know their position in the
+// ACL.  A typedef cannot be redefined — shadow it with a macro.
+#define acl_entry_t struct zos_acl_entry_desc *
+
 #else // !(defined(ZOSLIB_OVERRIDE_CLIB) || defined(ZOSLIB_OVERRIDE_CLIB_ACL))
 
 // Without the override, the z/OS declarations pass through unchanged.
 #include_next <sys/acl.h>
 
 #endif
+
+// The public handle: the z/OS working storage, owned by the handle,
+// plus the iteration state and the entry descriptors.  The entry
+// descriptors index the base entries (owner, group, other) as 0..2 and
+// the extended entries as 3..., which is what distinguishes the POSIX
+// object tags from the extended ones.
+// One ACL entry: the handle it belongs to and the entry index.
+struct zos_acl_entry_desc {
+    struct zos_acl_handle *ed_acl;
+    int ed_index;
+};
+
+struct zos_acl_handle {
+    lacl_t zh_le;			   // z/OS working storage
+    int zh_cursor;			   // iteration state
+    struct zos_acl_entry_desc zh_desc[1]; // 3 + entries descriptors
+};
+
+// Opaque handle to the ACL of a file.
+typedef struct zos_acl_handle *acl_t;
+// Opaque descriptor of one ACL entry, valid as long as the handle:
+// the acl_entry_t name is shadowed by a macro in the override section,
+// because the system header typedefs it differently.
+// Opaque permission set of an entry, pointing into the handle.
+typedef struct ACL_perm *acl_permset_t;
+
+// Entry ids for acl_get_entry().
+#define ACL_FIRST_ENTRY 0
+#define ACL_NEXT_ENTRY  1
+
+// POSIX tag types.  ACL_USER, ACL_GROUP and ACL_OTHER come from the
+// system header (the z/OS values); the object tags have no z/OS
+// counterpart and get their own values.  ACL_MASK is never returned:
+// z/OS has no mask entries.
+#define ACL_USER_OBJ  0x1000
+#define ACL_GROUP_OBJ 0x2000
+#define ACL_MASK      0x4000
+
+// Permission bits for the permset API, matching the rwx octal digit of
+// an entry.  The system header defines these as 1; redefined here.
+#undef ACL_READ
+#undef ACL_WRITE
+#undef ACL_EXECUTE
+#define ACL_READ    04
+#define ACL_WRITE   02
+#define ACL_EXECUTE 01
 
 #ifdef __cplusplus
 extern "C" {
@@ -106,27 +159,37 @@ extern "C" {
 // Implementation entry points, see src/zos-acl.c.  Declared
 // unconditionally, like __open_ascii in <fcntl.h>, so the definitions
 // get default visibility for the shared library export side-deck.
-__Z_EXPORT extern lacl_t __acl_get_file(const char *path_p, short type);
-__Z_EXPORT extern int __acl_set_file(const char *path_p, short type, lacl_t acl);
+__Z_EXPORT extern struct zos_acl_handle *__acl_get_file(const char *path_p,
+                                                        short type);
+__Z_EXPORT extern int __acl_set_file(const char *path_p, short type,
+                                     struct zos_acl_handle *acl);
 __Z_EXPORT extern int __acl_free(void *obj_p);
-__Z_EXPORT extern lacl_t __acl_get_fd(int fd, short type);
-__Z_EXPORT extern int __acl_set_fd(int fd, short type, lacl_t acl);
+__Z_EXPORT extern struct zos_acl_handle *__acl_get_fd(int fd, short type);
+__Z_EXPORT extern int __acl_set_fd(int fd, short type, struct zos_acl_handle *acl);
 __Z_EXPORT extern lacl_t __acl_from_text(const char *buf_p);
-__Z_EXPORT extern char *__acl_to_text(lacl_t acl, ssize_t *len_p);
+__Z_EXPORT extern char *__acl_to_text(struct zos_acl_handle *acl, ssize_t *len_p);
 __Z_EXPORT extern int __acl_delete_def_file(const char *path_p);
+__Z_EXPORT extern int __acl_get_entry(struct zos_acl_handle *acl, int entry_id,
+                                      struct zos_acl_entry_desc **entry_p);
+__Z_EXPORT extern int __acl_get_tag_type(struct zos_acl_entry_desc *entry_d);
+__Z_EXPORT extern int __acl_get_permset(struct zos_acl_entry_desc *entry_d,
+                                        struct ACL_perm **permset_p);
+__Z_EXPORT extern int __acl_get_perm(struct ACL_perm *permset_d, int perm);
+__Z_EXPORT extern void *__acl_get_qualifier(struct zos_acl_entry_desc *entry_d);
 
 #if defined(ZOSLIB_OVERRIDE_CLIB) || defined(ZOSLIB_OVERRIDE_CLIB_ACL)
 
 // The POSIX 1003.1e style API, bound to the implementation entry points
 // above.
 
-// Opaque handle to the ACL of a file: the z/OS working storage.
-typedef struct loc_ACL *acl_t;
+
 
 // Type of ACL to operate on.  Only access ACLs exist on z/OS, so
 // ACL_TYPE_DEFAULT is rejected with EINVAL by the functions below.
 #define ACL_TYPE_ACCESS  ((acl_type_t)ACL_ACCESS)
 #define ACL_TYPE_DEFAULT ((acl_type_t)ACL_DIRDEF)
+
+
 
 /**
  * Retrieves the ACL of the file "path_p".
@@ -225,6 +288,54 @@ __Z_EXPORT extern char *acl_to_text(acl_t acl, ssize_t *len_p)
  */
 __Z_EXPORT extern int acl_delete_def_file(const char *path_p)
     __asm("__acl_delete_def_file");
+
+/**
+ * Obtains the next entry of the ACL for the iteration.  The base
+ * entries (owner, group, other) come first, then the extended entries.
+ * The iteration state lives in the handle, like POSIX; concurrent
+ * iteration of a shared handle is therefore not safe (the ACL content
+ * is not modified).
+ * \param [in] acl handle to iterate.
+ * \param [in] entry_id ACL_FIRST_ENTRY to restart or ACL_NEXT_ENTRY
+ *   to continue.
+ * \param [out] entry_p receives the entry descriptor.
+ * \return 1 when an entry was returned, 0 when the ACL is exhausted,
+ *   -1 on error (errno is set).
+ */
+__Z_EXPORT extern int acl_get_entry(acl_t acl, int entry_id,
+                                    acl_entry_t *entry_p) __asm("__acl_get_entry");
+
+/**
+ * Returns the tag type of an entry: ACL_USER_OBJ, ACL_GROUP_OBJ or
+ * ACL_OTHER for the base entries, ACL_USER or ACL_GROUP for the
+ * extended ones.
+ */
+__Z_EXPORT extern int acl_get_tag_type(acl_entry_t entry_d)
+    __asm("__acl_get_tag_type");
+
+/**
+ * Obtains the permission set of an entry, pointing into the handle;
+ * valid as long as the handle.  Query it with acl_get_perm().
+ */
+__Z_EXPORT extern int acl_get_permset(acl_entry_t entry_d,
+                                      acl_permset_t *permset_p)
+    __asm("__acl_get_permset");
+
+/**
+ * Checks whether the permission set contains the permission: ACL_READ,
+ * ACL_WRITE or ACL_EXECUTE.
+ * \return 1 when contained, 0 when not, -1 on error (errno is set).
+ */
+__Z_EXPORT extern int acl_get_perm(acl_permset_t permset_d, int perm)
+    __asm("__acl_get_perm");
+
+/**
+ * Returns the qualifier (uid or gid) of an extended entry, in
+ * allocated memory to be released with acl_free().  The base entries
+ * have no qualifier: NULL with errno EINVAL.
+ */
+__Z_EXPORT extern void *acl_get_qualifier(acl_entry_t entry_d)
+    __asm("__acl_get_qualifier");
 
 #endif // ZOSLIB_OVERRIDE_CLIB
 

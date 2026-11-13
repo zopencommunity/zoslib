@@ -927,6 +927,77 @@ TEST_F(AclTest, FromTextDefaultTagRejected) {
   EXPECT_EQ(errno, EINVAL);
 }
 
+// acl_to_text() renders the whole ACL, base entries included, and the
+// text round-trips through acl_from_text().
+TEST_F(AclTest, ToTextRoundTrip) {
+  std::vector<Qualifier> quals;
+  Qualifier q = {ACL_USER, getuid()};
+  quals.push_back(q);
+  installEntries(quals, src_path_);
+  ASSERT_EQ(chmod(src_path_, 0640), 0);
+
+  acl_t acl = acl_get_file(src_path_, ACL_TYPE_ACCESS);
+  ASSERT_NE(acl, (acl_t)NULL);
+  ssize_t len = 0;
+  char *text = acl_to_text(acl, &len);
+  ASSERT_NE(text, (char *)NULL);
+  EXPECT_EQ((size_t)len, strlen(text));
+  EXPECT_NE(strstr(text, "user::rw-"), (char *)NULL);
+  EXPECT_NE(strstr(text, "group::r--"), (char *)NULL);
+  EXPECT_NE(strstr(text, "other::---"), (char *)NULL);
+  EXPECT_EQ(acl_free(acl), 0);
+
+  acl_t parsed = acl_from_text(text);
+  free(text);
+  ASSERT_NE(parsed, (acl_t)NULL);
+  ASSERT_EQ(aclEntryCount(parsed), 1);
+  EXPECT_EQ(aclEntry(parsed, 0)->acle_id, getuid());
+  EXPECT_EQ(aclEntry(parsed, 0)->acle_value.aclp_read, 1);
+  EXPECT_EQ(aclEntry(parsed, 0)->acle_value.aclp_write, 1);
+  EXPECT_EQ(aclEntry(parsed, 0)->acle_value.aclp_execute, 1);
+  for (int i = 0; i < 3; i++)
+    EXPECT_EQ(*(unsigned char *)&parsed->lacl_base_entry[i].acle_value,
+              *(unsigned char *)&acl->lacl_base_entry[i].acle_value);
+  EXPECT_EQ(acl_free(parsed), 0);
+}
+
+// A handle without extended entries renders the base entries only.
+TEST_F(AclTest, ToTextBaseOnly) {
+  ASSERT_EQ(chmod(src_path_, 0600), 0);
+  acl_t acl = acl_get_file(src_path_, ACL_TYPE_ACCESS);
+  ASSERT_NE(acl, (acl_t)NULL);
+  char *text = acl_to_text(acl, NULL);
+  ASSERT_NE(text, (char *)NULL);
+  EXPECT_STREQ(text, "user::rw-,group::---,other::---");
+  free(text);
+  EXPECT_EQ(acl_free(acl), 0);
+}
+
+TEST_F(AclTest, ToTextInvalid) {
+  errno = 0;
+  EXPECT_EQ(acl_to_text(NULL, NULL), (char *)NULL);
+  EXPECT_EQ(errno, EINVAL);
+}
+
+// acl_delete_def_file() removes the default ACLs of a directory;
+// removing one that does not exist is not an error.
+TEST_F(AclTest, DeleteDefFile) {
+  char dir[64];
+  snprintf(dir, sizeof(dir), "/tmp/zoslib_acl_ddir_XXXXXX");
+  ASSERT_NE(mkdtemp(dir), (char *)NULL);
+  EXPECT_EQ(acl_delete_def_file(dir), 0);
+  EXPECT_EQ(acl_delete_def_file(dir), 0); // idempotent
+  EXPECT_EQ(rmdir(dir), 0);
+
+  errno = 0;
+  EXPECT_EQ(acl_delete_def_file("/tmp/zoslib_acl_no_such_dir"), -1);
+  EXPECT_EQ(errno, ENOENT);
+
+  errno = 0;
+  EXPECT_EQ(acl_delete_def_file(NULL), -1);
+  EXPECT_EQ(errno, EINVAL);
+}
+
 // A file that does not exist is an error.
 TEST_F(AclTest, MissingFile) {
   errno = 0;

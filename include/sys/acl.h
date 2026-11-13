@@ -112,6 +112,8 @@ __Z_EXPORT extern int __acl_free(void *obj_p);
 __Z_EXPORT extern lacl_t __acl_get_fd(int fd, short type);
 __Z_EXPORT extern int __acl_set_fd(int fd, short type, lacl_t acl);
 __Z_EXPORT extern lacl_t __acl_from_text(const char *buf_p);
+__Z_EXPORT extern char *__acl_to_text(lacl_t acl, ssize_t *len_p);
+__Z_EXPORT extern int __acl_delete_def_file(const char *path_p);
 
 #if defined(ZOSLIB_OVERRIDE_CLIB) || defined(ZOSLIB_OVERRIDE_CLIB_ACL)
 
@@ -198,6 +200,31 @@ __Z_EXPORT extern int acl_set_fd(int fd, acl_type_t type, acl_t acl)
  *   set).
  */
 __Z_EXPORT extern acl_t acl_from_text(const char *buf_p) __asm("__acl_from_text");
+
+/**
+ * Converts an ACL into its text form: comma separated entries of
+ * "type::perm" (base) and "type:id:perm" (extended), e.g.
+ * "user::rw-,group::r--,other::r--,user:123:rwx".  Ids are rendered as
+ * user or group names where they can be resolved, numbers otherwise.
+ * \param [in] acl handle from acl_get_file()/acl_get_fd()/
+ *   acl_from_text(); not modified.
+ * \param [out] len_p if not NULL, receives the text length excluding
+ *   the null terminator.
+ * \return the text in allocated memory, to be released with free(),
+ *   or NULL on error (errno is set).
+ */
+__Z_EXPORT extern char *acl_to_text(acl_t acl, ssize_t *len_p)
+    __asm("__acl_to_text");
+
+/**
+ * Removes the default ACL of the directory "path_p".  z/OS has two
+ * default ACL types (file and directory default); both are removed.
+ * Removing a default ACL that does not exist is not an error.
+ * \param [in] path_p directory name, in ASCII.
+ * \return 0 on success, -1 on error (errno is set).
+ */
+__Z_EXPORT extern int acl_delete_def_file(const char *path_p)
+    __asm("__acl_delete_def_file");
 
 #endif // ZOSLIB_OVERRIDE_CLIB
 

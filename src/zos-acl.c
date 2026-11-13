@@ -59,6 +59,8 @@ extern int __acl_delete_fd_le(int fd, short type_d) asm("@@LDFD");
 extern int __acl_valid_le(lacl_t acl_d, void *entry_p) asm("@@LVALID");
 extern int __le_acl_from_text(const char *buf_p, short op_type, acl_all_t set_ptr,
                               char **ret) asm("@@LFTEXT");
+extern char *__le_acl_to_text(const lacl_t acl_d, ssize_t *len_p, short type_d,
+                              char delim) asm("@@LTTEXT");
 
 // Upper bound of ACL entries to retrieve; RACF and the file system
 // regulate the real limit.
@@ -649,6 +651,74 @@ lacl_t __acl_from_text(const char *buf_p) {
     return NULL;
   }
   return acl;
+}
+
+char *__acl_to_text(lacl_t acl, ssize_t *len_p) {
+  if (acl == NULL) {
+    errno = EINVAL;
+    return NULL;
+  }
+
+  // The LE acl_to_text() emits the extended entries only (and returns
+  // NULL for a handle without any); the base entries are rendered here
+  // so that the text form carries the whole ACL and round-trips
+  // through acl_from_text().
+  char base[64];
+  int off = 0;
+  static const char *names[3] = {"user", "group", "other"};
+  for (int i = 0; i < 3; i++) {
+    int perm = ACL_PERM(&acl->lacl_base_entry[i]);
+    off += snprintf(base + off, sizeof(base) - off, "%s%s::%c%c%c",
+                    i > 0 ? "," : "", names[i], (perm & 04) ? 'r' : '-',
+                    (perm & 02) ? 'w' : '-', (perm & 01) ? 'x' : '-');
+  }
+
+  ssize_t ext_len = 0;
+  char *ext = __le_acl_to_text(acl, &ext_len, ACL_ACCESS, (char)0x6B);
+  char *etext = NULL;
+  if (ext != NULL) {
+    etext = (char *)malloc(ext_len + 1);
+    if (etext != NULL) {
+      memcpy(etext, ext, ext_len);
+      etext[ext_len] = '\0';
+      __e2a_s(etext); // the LE text is EBCDIC
+    }
+    free(ext);
+    if (etext == NULL)
+      return NULL;
+  }
+
+  size_t total = strlen(base) + (etext != NULL ? 1 + strlen(etext) : 0);
+  char *text = (char *)malloc(total + 1);
+  if (text == NULL) {
+    free(etext);
+    return NULL;
+  }
+  snprintf(text, total + 1, "%s%s%s", base, etext != NULL ? "," : "",
+           etext != NULL ? etext : "");
+  free(etext);
+  if (len_p != NULL)
+    *len_p = (ssize_t)total;
+  return text;
+}
+
+int __acl_delete_def_file(const char *path_p) {
+  if (path_p == NULL) {
+    errno = EINVAL;
+    return -1;
+  }
+
+  char epath[1024];
+  if (zos_acl_path_a2e(path_p, epath, sizeof(epath)) != 0)
+    return -1;
+
+  // z/OS has two default ACL types (file and directory default); the
+  // POSIX "default" concept covers both, remove them all.  Deleting a
+  // default ACL that does not exist is not an error.
+  int rc = __acl_delete_file_le(epath, ACL_FILDEF);
+  if (rc == 0)
+    rc = __acl_delete_file_le(epath, ACL_DIRDEF);
+  return rc;
 }
 
 int __acl_free(void *obj_p) {

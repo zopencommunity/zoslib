@@ -738,6 +738,195 @@ TEST_F(AclTest, SetuidWithWritableModeEmptyHandleIsRefused) {
   EXPECT_EQ(st.st_mode & 07777, (mode_t)04777);
 }
 
+// acl_get_fd() retrieves the same ACL as acl_get_file().
+TEST_F(AclTest, GetFdMatchesGetFile) {
+  std::vector<Qualifier> quals;
+  Qualifier q = {ACL_USER, getuid()};
+  quals.push_back(q);
+  installEntries(quals, src_path_);
+
+  acl_t by_path = acl_get_file(src_path_, ACL_TYPE_ACCESS);
+  ASSERT_NE(by_path, (acl_t)NULL);
+  int fd = open(src_path_, O_RDONLY);
+  ASSERT_GE(fd, 0);
+  acl_t by_fd = acl_get_fd(fd, ACL_TYPE_ACCESS);
+  close(fd);
+  ASSERT_NE(by_fd, (acl_t)NULL);
+
+  EXPECT_EQ(aclEntryCount(by_path), aclEntryCount(by_fd));
+  EXPECT_EQ(aclEntry(by_fd, 0)->acle_id, aclEntry(by_path, 0)->acle_id);
+  for (int i = 0; i < 3; i++)
+    EXPECT_EQ(*(unsigned char *)&by_fd->lacl_base_entry[i].acle_value,
+              *(unsigned char *)&by_path->lacl_base_entry[i].acle_value);
+  EXPECT_EQ(acl_free(by_path), 0);
+  EXPECT_EQ(acl_free(by_fd), 0);
+}
+
+// acl_get_fd() on a file without extended entries synthesizes the
+// handle from the descriptor.
+TEST_F(AclTest, GetFdNoEntries) {
+  ASSERT_EQ(chmod(src_path_, 0640), 0);
+  int fd = open(src_path_, O_RDONLY);
+  ASSERT_GE(fd, 0);
+  acl_t acl = acl_get_fd(fd, ACL_TYPE_ACCESS);
+  close(fd);
+  ASSERT_NE(acl, (acl_t)NULL);
+  EXPECT_EQ(aclEntryCount(acl), 0);
+  EXPECT_EQ(acl->lacl_base, 3);
+  EXPECT_EQ(acl_free(acl), 0);
+}
+
+// acl_set_fd() applies a non-empty ACL through the caller descriptor,
+// which is not closed.
+TEST_F(AclTest, SetFdRoundTrip) {
+  std::vector<Qualifier> quals;
+  Qualifier q = {ACL_USER, getuid()};
+  quals.push_back(q);
+  installEntries(quals, src_path_);
+  ASSERT_EQ(chmod(src_path_, 0750), 0);
+
+  acl_t acl = acl_get_file(src_path_, ACL_TYPE_ACCESS);
+  ASSERT_NE(acl, (acl_t)NULL);
+  int fd = open(dst_path_, O_RDONLY | O_NONBLOCK);
+  ASSERT_GE(fd, 0);
+  EXPECT_EQ(acl_set_fd(fd, ACL_TYPE_ACCESS, acl), 0);
+  EXPECT_EQ(acl_free(acl), 0);
+  // still usable after the update
+  EXPECT_EQ(fcntl(fd, F_GETFD), 0);
+
+  acl_t check = acl_get_file(dst_path_, ACL_TYPE_ACCESS);
+  ASSERT_NE(check, (acl_t)NULL);
+  EXPECT_EQ(aclEntryCount(check), 1);
+  EXPECT_EQ(aclEntry(check, 0)->acle_id, getuid());
+  EXPECT_EQ(acl_free(check), 0);
+  close(fd);
+
+  struct stat st;
+  ASSERT_EQ(stat(dst_path_, &st), 0);
+  EXPECT_EQ(st.st_mode & 0777, (mode_t)0750);
+}
+
+// acl_set_fd() with an empty handle clears and restores the mode.
+TEST_F(AclTest, SetFdEmpty) {
+  ASSERT_EQ(chmod(src_path_, 0600), 0);
+  ASSERT_EQ(chmod(dst_path_, 0666), 0);
+  std::vector<Qualifier> quals = collectQualifiers(1);
+  ASSERT_GE((int)quals.size(), 1);
+  installEntries(quals, dst_path_);
+
+  acl_t empty = acl_get_file(src_path_, ACL_TYPE_ACCESS);
+  ASSERT_NE(empty, (acl_t)NULL);
+  int fd = open(dst_path_, O_RDONLY | O_NONBLOCK);
+  ASSERT_GE(fd, 0);
+  EXPECT_EQ(acl_set_fd(fd, ACL_TYPE_ACCESS, empty), 0);
+  EXPECT_EQ(acl_free(empty), 0);
+  close(fd);
+
+  struct stat st;
+  ASSERT_EQ(stat(dst_path_, &st), 0);
+  EXPECT_EQ(st.st_mode & 0777, (mode_t)0600);
+  acl_t check = acl_get_file(dst_path_, ACL_TYPE_ACCESS);
+  ASSERT_NE(check, (acl_t)NULL);
+  EXPECT_EQ(aclEntryCount(check), 0);
+  EXPECT_EQ(acl_free(check), 0);
+}
+
+// The setuid refusal works through the descriptor as well.
+TEST_F(AclTest, SetFdSetuidRefused) {
+  ASSERT_EQ(chmod(dst_path_, 04755), 0);
+  std::vector<Qualifier> quals = collectQualifiers(2);
+  const Qualifier *other = NULL;
+  for (const auto &q : quals)
+    if (q.type != ACL_USER || q.id != (long)getuid())
+      other = &q;
+  ASSERT_NE(other, (const Qualifier *)NULL);
+  char cmd[1024];
+  snprintf(cmd, sizeof(cmd), "setfacl -m %s %s", specOf(*other).c_str(),
+           src_path_);
+  ASSERT_EQ(system(cmd), 0) << cmd;
+  ASSERT_EQ(chmod(src_path_, 0750), 0);
+
+  acl_t acl = acl_get_file(src_path_, ACL_TYPE_ACCESS);
+  ASSERT_NE(acl, (acl_t)NULL);
+  int fd = open(dst_path_, O_RDONLY | O_NONBLOCK);
+  ASSERT_GE(fd, 0);
+  errno = 0;
+  EXPECT_EQ(acl_set_fd(fd, ACL_TYPE_ACCESS, acl), -1);
+  EXPECT_EQ(errno, EPERM);
+  EXPECT_EQ(acl_free(acl), 0);
+  close(fd);
+
+  struct stat st;
+  ASSERT_EQ(stat(dst_path_, &st), 0);
+  EXPECT_EQ(st.st_mode & 07777, (mode_t)04755);
+}
+
+// acl_from_text() parses the POSIX text form, including user names and
+// octal permissions, and the handle applies like any other.
+TEST_F(AclTest, FromTextParses) {
+  char text[256];
+  snprintf(text, sizeof(text), "user::rw-,group::r--,other::r--,user:%ld:rwx",
+           (long)getuid());
+  acl_t acl = acl_from_text(text);
+  ASSERT_NE(acl, (acl_t)NULL);
+  ASSERT_EQ(aclEntryCount(acl), 1);
+  EXPECT_EQ(aclEntry(acl, 0)->acle_id, getuid());
+  EXPECT_EQ(aclEntry(acl, 0)->acle_value.aclp_read, 1);
+  EXPECT_EQ(aclEntry(acl, 0)->acle_value.aclp_write, 1);
+  EXPECT_EQ(aclEntry(acl, 0)->acle_value.aclp_execute, 1);
+
+  EXPECT_EQ(acl_set_file(dst_path_, ACL_TYPE_ACCESS, acl), 0);
+  EXPECT_EQ(acl_free(acl), 0);
+
+  acl_t check = acl_get_file(dst_path_, ACL_TYPE_ACCESS);
+  ASSERT_NE(check, (acl_t)NULL);
+  EXPECT_EQ(aclEntryCount(check), 1);
+  EXPECT_EQ(acl_free(check), 0);
+  struct stat st;
+  ASSERT_EQ(stat(dst_path_, &st), 0);
+  EXPECT_EQ(st.st_mode & 0777, (mode_t)0644);
+}
+
+TEST_F(AclTest, FromTextOctalAndNames) {
+  acl_t acl = acl_from_text("user::6,group::4,other::4");
+  ASSERT_NE(acl, (acl_t)NULL);
+  EXPECT_EQ(aclEntryCount(acl), 0);
+  EXPECT_EQ(acl->lacl_base, 3);
+  EXPECT_EQ(acl_free(acl), 0);
+
+  acl = acl_from_text("user::rw-\ngroup::r--\nother::r--\n");
+  ASSERT_NE(acl, (acl_t)NULL);
+  EXPECT_EQ(aclEntryCount(acl), 0);
+  EXPECT_EQ(acl_free(acl), 0);
+}
+
+TEST_F(AclTest, FromTextInvalid) {
+  errno = 0;
+  EXPECT_EQ(acl_from_text("hello world"), (acl_t)NULL);
+  EXPECT_EQ(errno, EINVAL);
+  errno = 0;
+  EXPECT_EQ(acl_from_text(""), (acl_t)NULL);
+  EXPECT_EQ(errno, EINVAL);
+  errno = 0;
+  EXPECT_EQ(acl_from_text(NULL), (acl_t)NULL);
+  EXPECT_EQ(errno, EINVAL);
+}
+
+// Text without the three base entries would leave them unset; the
+// handle is rejected at creation.
+TEST_F(AclTest, FromTextIncomplete) {
+  errno = 0;
+  EXPECT_EQ(acl_from_text("user:123:rwx"), (acl_t)NULL);
+  EXPECT_EQ(errno, EINVAL);
+}
+
+// A default tag is not part of the POSIX text form.
+TEST_F(AclTest, FromTextDefaultTagRejected) {
+  errno = 0;
+  EXPECT_EQ(acl_from_text("default:user::rw-"), (acl_t)NULL);
+  EXPECT_EQ(errno, EINVAL);
+}
+
 // A file that does not exist is an error.
 TEST_F(AclTest, MissingFile) {
   errno = 0;

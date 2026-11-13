@@ -109,6 +109,9 @@ extern "C" {
 __Z_EXPORT extern lacl_t __acl_get_file(const char *path_p, short type);
 __Z_EXPORT extern int __acl_set_file(const char *path_p, short type, lacl_t acl);
 __Z_EXPORT extern int __acl_free(void *obj_p);
+__Z_EXPORT extern lacl_t __acl_get_fd(int fd, short type);
+__Z_EXPORT extern int __acl_set_fd(int fd, short type, lacl_t acl);
+__Z_EXPORT extern lacl_t __acl_from_text(const char *buf_p);
 
 #if defined(ZOSLIB_OVERRIDE_CLIB) || defined(ZOSLIB_OVERRIDE_CLIB_ACL)
 
@@ -154,6 +157,47 @@ __Z_EXPORT extern int acl_set_file(const char *path_p, acl_type_t type, acl_t ac
  * \return 0 on success, -1 on error (errno is set).
  */
 __Z_EXPORT extern int acl_free(void *obj_p) __asm("__acl_free");
+
+/**
+ * Retrieves the ACL of the file referred to by the descriptor "fd".
+ * \param [in] fd file descriptor pinned to the file.
+ * \param [in] type must be ACL_TYPE_ACCESS.
+ * \return a handle in allocated memory; a file without extended ACL
+ *   entries yields a handle without entries.  NULL only on error
+ *   (errno is set).
+ */
+__Z_EXPORT extern acl_t acl_get_fd(int fd, acl_type_t type)
+    __asm("__acl_get_fd");
+
+/**
+ * Applies an ACL previously retrieved with acl_get_file() or
+ * acl_get_fd() to the file referred to by the descriptor "fd", with
+ * the same semantics as acl_set_file().  The descriptor belongs to
+ * the caller and is not closed.
+ * \param [in] fd file descriptor pinned to the file.
+ * \param [in] type must be ACL_TYPE_ACCESS.
+ * \param [in] acl handle from acl_get_file()/acl_get_fd()/
+ *   acl_from_text(), may be NULL; not modified.
+ * \return 0 on success, -1 on error (errno is set).
+ */
+__Z_EXPORT extern int acl_set_fd(int fd, acl_type_t type, acl_t acl)
+    __asm("__acl_set_fd");
+
+/**
+ * Converts the text form of an access ACL into a handle.  Entries are
+ * separated by commas or newlines: "type::perm" for the base entries
+ * and "type:id:perm" for extended entries, e.g.
+ * "user::rw-,group::r--,other::r--,user:123:rwx".  Permissions are
+ * rwx, '-' or an octal digit; ids are uid/gid numbers or user names.
+ * The text form carries a single access ACL; default tags are
+ * rejected.  The resulting handle is validated: text without the
+ * three base entries is rejected with EINVAL (POSIX allows returning
+ * an invalid ACL, applying one would set an undefined mode).
+ * \param [in] buf_p the ACL text, in ASCII, null terminated.
+ * \return a handle in allocated memory, or NULL on error (errno is
+ *   set).
+ */
+__Z_EXPORT extern acl_t acl_from_text(const char *buf_p) __asm("__acl_from_text");
 
 #endif // ZOSLIB_OVERRIDE_CLIB
 

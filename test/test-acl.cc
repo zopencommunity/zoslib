@@ -1099,6 +1099,38 @@ TEST_F(AclTest, PermsetOfBaseEntries) {
   EXPECT_EQ(acl_free(acl), 0);
 }
 
+// A directory always has a default-ACL handle, possibly empty — the
+// state on z/OS, where default ACLs cannot be created.  gnulib's
+// copy-acl relies on this: the empty handle is "trivial" and routes
+// to acl_delete_def_file() on the destination.
+TEST_F(AclTest, DefaultAclOfDirectoryIsEmpty) {
+  char dir[64];
+  snprintf(dir, sizeof(dir), "/tmp/zoslib_acl_defdir_XXXXXX");
+  ASSERT_NE(mkdtemp(dir), (char *)NULL);
+
+  acl_t acl = acl_get_file(dir, ACL_TYPE_DEFAULT);
+  ASSERT_NE(acl, (acl_t)NULL);
+  EXPECT_EQ(aclEntryCount(acl), 0);
+
+  // The iteration is immediately exhausted: acl_entries() == 0.
+  acl_entry_t entry;
+  EXPECT_EQ(acl_get_entry(acl, ACL_FIRST_ENTRY, &entry), 0);
+  EXPECT_EQ(acl_free(acl), 0);
+
+  // A file has no default ACL at all.
+  acl = acl_get_file(src_path_, ACL_TYPE_DEFAULT);
+  EXPECT_EQ(acl, (acl_t)NULL);
+  EXPECT_EQ(errno, EINVAL);
+
+  // A missing path propagates the error.
+  errno = 0;
+  EXPECT_EQ(acl_get_file("/tmp/zoslib_acl_no_such_dir", ACL_TYPE_DEFAULT),
+            (acl_t)NULL);
+  EXPECT_EQ(errno, ENOENT);
+
+  ASSERT_EQ(rmdir(dir), 0);
+}
+
 // A file that does not exist is an error.
 TEST_F(AclTest, MissingFile) {
   errno = 0;

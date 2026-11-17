@@ -76,11 +76,13 @@ struct zos_acl_obj_header {
 #define ZOS_ACL_TEXT_TAG      ((size_t)0x5A434C03)
 
 // Wraps LE working storage into a published handle with the entry
-// descriptors; takes ownership of "le" (freed on failure).
+// descriptors; takes ownership of "le" (freed on failure).  The base
+// entries are counted from lacl_base: an access ACL always has three,
+// a default-ACL handle has none.
 static struct zos_acl_handle *zos_acl_publish(lacl_t le) {
   if (le == NULL)
     return NULL;
-  int n = 3 + le->lacl_data.aclb_entry.acl_entnum;
+  int n = le->lacl_base + le->lacl_data.aclb_entry.acl_entnum;
   char *mem =
       (char *)malloc(sizeof(struct zos_acl_obj_header) +
                      sizeof(struct zos_acl_handle) +
@@ -160,8 +162,34 @@ static int zos_acl_initial_count = 16;
 __Z_EXPORT void __acl_set_initial_count(int count) { zos_acl_initial_count = count; }
 
 struct zos_acl_handle *__acl_get_file(const char *path_p, short type) {
-  if (path_p == NULL || type != ACL_ACCESS) {
-    errno = EINVAL; // z/OS has no default ACLs
+  if (path_p == NULL) {
+    errno = EINVAL;
+    return NULL;
+  }
+
+  if (type == ACL_DIRDEF || type == ACL_FILDEF) {
+    // A directory has a default ACL handle even when it carries no
+    // default entries — that is the state on z/OS, where default ACLs
+    // cannot be created.  Linux behaves the same way for a directory
+    // without a default ACL, and gnulib's copy-acl relies on it: an
+    // empty (trivial) default ACL routes to acl_delete_def_file() on
+    // the destination.  A non-directory has no default ACL at all.
+    struct stat st;
+    if (stat(path_p, &st) != 0)
+      return NULL;
+    if (!S_ISDIR(st.st_mode)) {
+      errno = EINVAL;
+      return NULL;
+    }
+    lacl_t empty = __acl_init_le(3);
+    if (empty == NULL)
+      return NULL;
+    empty->lacl_base = 0; // no base entries: a default ACL has none
+    return zos_acl_publish(empty);
+  }
+
+  if (type != ACL_ACCESS) {
+    errno = EINVAL;
     return NULL;
   }
 
@@ -805,7 +833,7 @@ int __acl_get_entry(struct zos_acl_handle *acl, int entry_id,
     errno = EINVAL;
     return -1;
   }
-  int n = 3 + acl->zh_le->lacl_data.aclb_entry.acl_entnum;
+  int n = acl->zh_le->lacl_base + acl->zh_le->lacl_data.aclb_entry.acl_entnum;
   if (entry_id == ACL_FIRST_ENTRY)
     acl->zh_cursor = 0;
   if (acl->zh_cursor >= n) {

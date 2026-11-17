@@ -1099,22 +1099,33 @@ TEST_F(AclTest, PermsetOfBaseEntries) {
   EXPECT_EQ(acl_free(acl), 0);
 }
 
-// A directory always has a default-ACL handle, possibly empty — the
-// state on z/OS, where default ACLs cannot be created.  gnulib's
-// copy-acl relies on this: the empty handle is "trivial" and routes
-// to acl_delete_def_file() on the destination.
-TEST_F(AclTest, DefaultAclOfDirectoryIsEmpty) {
+// A directory without a default ACL yields an empty handle; one with
+// a stored default (created with setfacl) yields its entries.  gnulib
+// relies on the empty case: the handle is "trivial" and routes to
+// acl_delete_def_file() on the destination.
+TEST_F(AclTest, DefaultAclGet) {
   char dir[64];
   snprintf(dir, sizeof(dir), "/tmp/zoslib_acl_defdir_XXXXXX");
   ASSERT_NE(mkdtemp(dir), (char *)NULL);
 
+  // Fresh: empty.
   acl_t acl = acl_get_file(dir, ACL_TYPE_DEFAULT);
   ASSERT_NE(acl, (acl_t)NULL);
   EXPECT_EQ(aclEntryCount(acl), 0);
-
-  // The iteration is immediately exhausted: acl_entries() == 0.
   acl_entry_t entry;
   EXPECT_EQ(acl_get_entry(acl, ACL_FIRST_ENTRY, &entry), 0);
+  EXPECT_EQ(acl_free(acl), 0);
+
+  // After setfacl: the entries come back.
+  char cmd[1024];
+  snprintf(cmd, sizeof(cmd), "setfacl -m default:user:%ld:rwx %s",
+           (long)getuid(), dir);
+  ASSERT_EQ(system(cmd), 0) << cmd;
+  acl = acl_get_file(dir, ACL_TYPE_DEFAULT);
+  ASSERT_NE(acl, (acl_t)NULL);
+  ASSERT_EQ(aclEntryCount(acl), 1);
+  EXPECT_EQ(aclEntry(acl, 0)->acle_id, getuid());
+  EXPECT_EQ(aclEntry(acl, 0)->acle_value.aclp_execute, 1);
   EXPECT_EQ(acl_free(acl), 0);
 
   // A file has no default ACL at all.
@@ -1128,7 +1139,93 @@ TEST_F(AclTest, DefaultAclOfDirectoryIsEmpty) {
             (acl_t)NULL);
   EXPECT_EQ(errno, ENOENT);
 
+  // Non-directories are rejected for setting too.
+  errno = 0;
+  acl = acl_from_text("default:user:123:rwx");
+  ASSERT_NE(acl, (acl_t)NULL);
+  EXPECT_EQ(acl_set_file(src_path_, ACL_TYPE_DEFAULT, acl), -1);
+  EXPECT_EQ(errno, EINVAL);
+  EXPECT_EQ(acl_free(acl), 0);
+
   ASSERT_EQ(rmdir(dir), 0);
+}
+
+// from_text with default: tags yields a default handle; setting it on
+// a directory stores a default ACL, verified through inheritance —
+// the ground truth, since getfacl does not display stored defaults.
+TEST_F(AclTest, DefaultAclSetAndInherit) {
+  char dir[64], child[80];
+  snprintf(dir, sizeof(dir), "/tmp/zoslib_acl_setdir_XXXXXX");
+  ASSERT_NE(mkdtemp(dir), (char *)NULL);
+
+  char dtext[128];
+  snprintf(dtext, sizeof(dtext), "default:user:%ld:rwx", (long)getuid());
+  acl_t acl = acl_from_text(dtext);
+  ASSERT_NE(acl, (acl_t)NULL);
+  EXPECT_EQ(aclEntryCount(acl), 1);
+  EXPECT_EQ(acl->zh_default, 1);
+  EXPECT_EQ(acl_set_file(dir, ACL_TYPE_DEFAULT, acl), 0);
+  EXPECT_EQ(acl_free(acl), 0);
+
+  // Retrieve it back through the API.
+  acl_t back = acl_get_file(dir, ACL_TYPE_DEFAULT);
+  ASSERT_NE(back, (acl_t)NULL);
+  ASSERT_EQ(aclEntryCount(back), 1);
+  EXPECT_EQ(aclEntry(back, 0)->acle_id, getuid());
+  EXPECT_EQ(acl_free(back), 0);
+
+  // Ground truth: a file created inside inherits the entry.
+  snprintf(child, sizeof(child), "%s/newfile", dir);
+  ASSERT_EQ(close(open(child, O_CREAT | O_WRONLY, 0644)), 0);
+  acl_t inherited = acl_get_file(child, ACL_TYPE_ACCESS);
+  ASSERT_NE(inherited, (acl_t)NULL);
+  ASSERT_EQ(aclEntryCount(inherited), 1);
+  EXPECT_EQ(aclEntry(inherited, 0)->acle_id, getuid());
+  EXPECT_EQ(acl_free(inherited), 0);
+
+  // An empty default handle removes the defaults: inheritance stops.
+  acl = acl_get_file(src_path_, ACL_TYPE_ACCESS);
+  ASSERT_NE(acl, (acl_t)NULL);
+  // build an empty default handle via from_text of base-only default
+  acl_t empty_def = acl_from_text("default:user::rwx");
+  if (empty_def != NULL) {
+    EXPECT_EQ(acl_set_file(dir, ACL_TYPE_DEFAULT, empty_def), 0);
+    acl_free(empty_def);
+    snprintf(child, sizeof(child), "%s/after", dir);
+    ASSERT_EQ(close(open(child, O_CREAT | O_WRONLY, 0644)), 0);
+    inherited = acl_get_file(child, ACL_TYPE_ACCESS);
+    ASSERT_NE(inherited, (acl_t)NULL);
+    EXPECT_EQ(aclEntryCount(inherited), 0);
+    acl_free(inherited);
+  }
+  acl_free(acl);
+
+  snprintf(child, sizeof(child), "%s/newfile", dir);
+  remove(child);
+  snprintf(child, sizeof(child), "%s/after", dir);
+  remove(child);
+  ASSERT_EQ(rmdir(dir), 0);
+}
+
+// Mixing access and default entries in one text is ambiguous;
+// fdefault: and default: together are too.
+TEST_F(AclTest, DefaultAclTextRejected) {
+  errno = 0;
+  EXPECT_EQ(acl_from_text("user::rw-,group::r--,other::r--,default:user:1:rwx"),
+            (acl_t)NULL);
+  EXPECT_EQ(errno, EINVAL);
+  errno = 0;
+  EXPECT_EQ(acl_from_text("fdefault:user:1:rwx,default:user:2:rwx"),
+            (acl_t)NULL);
+  EXPECT_EQ(errno, EINVAL);
+  // An access handle cannot be installed as a default: it has base
+  // entries, which a default ACL cannot carry.
+  acl_t access_acl = acl_from_text("user::rw-,group::r--,other::r--");
+  ASSERT_NE(access_acl, (acl_t)NULL);
+  errno = 0;
+  EXPECT_EQ(acl_set_file(src_path_, ACL_TYPE_DEFAULT, access_acl), -1);
+  EXPECT_EQ(errno, EINVAL);
+  EXPECT_EQ(acl_free(access_acl), 0);
 }
 
 // A file that does not exist is an error.
@@ -1144,9 +1241,9 @@ TEST_F(AclTest, DefaultTypeRejected) {
   errno = 0;
   EXPECT_EQ(acl_get_file(src_path_, ACL_TYPE_DEFAULT), (acl_t)NULL);
   EXPECT_EQ(errno, EINVAL);
-  errno = 0;
-  EXPECT_EQ(acl_set_file(dst_path_, ACL_TYPE_DEFAULT, NULL), -1);
-  EXPECT_EQ(errno, EINVAL);
+  // A NULL handle is a no-op for the default type as well, consistent
+  // with ACL_TYPE_ACCESS.
+  EXPECT_EQ(acl_set_file(dst_path_, ACL_TYPE_DEFAULT, NULL), 0);
 }
 
 // Applying a NULL handle is a no-op, so callers need no special casing

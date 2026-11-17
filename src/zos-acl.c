@@ -79,7 +79,7 @@ struct zos_acl_obj_header {
 // descriptors; takes ownership of "le" (freed on failure).  The base
 // entries are counted from lacl_base: an access ACL always has three,
 // a default-ACL handle has none.
-static struct zos_acl_handle *zos_acl_publish(lacl_t le) {
+static struct zos_acl_handle *zos_acl_publish_as(lacl_t le, int is_default) {
   if (le == NULL)
     return NULL;
   int n = le->lacl_base + le->lacl_data.aclb_entry.acl_entnum;
@@ -96,11 +96,16 @@ static struct zos_acl_handle *zos_acl_publish(lacl_t le) {
       (struct zos_acl_handle *)(mem + sizeof(struct zos_acl_obj_header));
   h->zh_le = le;
   h->zh_cursor = 0;
+  h->zh_default = is_default;
   for (int i = 0; i < n; i++) {
     h->zh_desc[i].ed_acl = h;
     h->zh_desc[i].ed_index = i;
   }
   return h;
+}
+
+static struct zos_acl_handle *zos_acl_publish(lacl_t le) {
+  return zos_acl_publish_as(le, 0);
 }
 
 // The real entry an entry descriptor refers to.
@@ -167,13 +172,19 @@ struct zos_acl_handle *__acl_get_file(const char *path_p, short type) {
     return NULL;
   }
 
+  char epath[1024];
+  if (zos_acl_path_a2e(path_p, epath, sizeof(epath)) != 0)
+    return NULL;
+
   if (type == ACL_DIRDEF || type == ACL_FILDEF) {
-    // A directory has a default ACL handle even when it carries no
-    // default entries — that is the state on z/OS, where default ACLs
-    // cannot be created.  Linux behaves the same way for a directory
-    // without a default ACL, and gnulib's copy-acl relies on it: an
-    // empty (trivial) default ACL routes to acl_delete_def_file() on
-    // the destination.  A non-directory has no default ACL at all.
+    // The default ACL of a directory.  A directory without one yields
+    // a handle without entries — Linux behaves the same way, and
+    // gnulib's copy-acl relies on it: the empty handle is trivial and
+    // routes to acl_delete_def_file() on the destination.  z/OS has
+    // two default ACL types: the handle carries the file default when
+    // one is stored, the directory default otherwise; ACL_FILDEF
+    // retrieves the file default alone.  A non-directory has no
+    // default ACL at all.
     struct stat st;
     if (stat(path_p, &st) != 0)
       return NULL;
@@ -181,21 +192,48 @@ struct zos_acl_handle *__acl_get_file(const char *path_p, short type) {
       errno = EINVAL;
       return NULL;
     }
+
+    static const short types[] = {ACL_FILDEF, ACL_DIRDEF};
+    int ntypes = type == ACL_FILDEF ? 1 : 2;
+    for (int t = 0; t < ntypes; t++) {
+      for (int count = zos_acl_initial_count;; count *= 8) {
+        if (count > ZOS_ACL_MAX_ENTRIES)
+          count = ZOS_ACL_MAX_ENTRIES;
+
+        lacl_t acl = __acl_init_le(count);
+        if (acl == NULL)
+          return NULL;
+
+        int num = 0;
+        if (__acl_get_file_le(epath, types[t], acl, &num) == 0) {
+          if (acl->lacl_data.aclb_entry.acl_entnum > 0)
+            return zos_acl_publish_as(acl, 1);
+          __acl_free_le(acl);
+          break; // this type carries nothing, try the next
+        }
+
+        int save_errno = errno;
+        __acl_free_le(acl);
+        errno = save_errno;
+        if (errno == E2BIG && count != ZOS_ACL_MAX_ENTRIES)
+          continue; // grow the storage
+        if (errno != ENOENT)
+          return NULL; // a real retrieval error
+        break; // nothing of this type, try the next
+      }
+    }
+
     lacl_t empty = __acl_init_le(3);
     if (empty == NULL)
       return NULL;
     empty->lacl_base = 0; // no base entries: a default ACL has none
-    return zos_acl_publish(empty);
+    return zos_acl_publish_as(empty, 1);
   }
 
   if (type != ACL_ACCESS) {
     errno = EINVAL;
     return NULL;
   }
-
-  char epath[1024];
-  if (zos_acl_path_a2e(path_p, epath, sizeof(epath)) != 0)
-    return NULL;
 
   // Grow the working storage on E2BIG, up to the maximum.
   int count = zos_acl_initial_count;
@@ -555,9 +593,14 @@ static int zos_acl_set_nonempty_fd(int fd, lacl_t acl) {
 }
 
 int __acl_set_file(const char *path_p, short type, struct zos_acl_handle *acl) {
-  if (path_p == NULL || type != ACL_ACCESS || acl == NULL) {
-    if (acl == NULL && path_p != NULL && type == ACL_ACCESS)
+  if (path_p == NULL || acl == NULL) {
+    if (acl == NULL && path_p != NULL &&
+        (type == ACL_ACCESS || type == ACL_DIRDEF || type == ACL_FILDEF))
       return 0; // no ACL to apply
+    errno = EINVAL;
+    return -1;
+  }
+  if (type != ACL_ACCESS && type != ACL_DIRDEF && type != ACL_FILDEF) {
     errno = EINVAL;
     return -1;
   }
@@ -566,6 +609,36 @@ int __acl_set_file(const char *path_p, short type, struct zos_acl_handle *acl) {
   char epath[1024];
   if (zos_acl_path_a2e(path_p, epath, sizeof(epath)) != 0)
     return -1;
+
+  if (type == ACL_DIRDEF || type == ACL_FILDEF) {
+    // Setting the default ACL of a directory: no mode, no special
+    // bits, none of the access-ACL machinery — just the LE request.
+    // An empty handle removes the defaults; a handle with entries is
+    // stored as both the file and the directory default (ACL_FILDEF
+    // stores the file default alone), the POSIX single-default
+    // concept.  A default ACL has no base entries, LE rejects them.
+    struct stat st;
+    if (stat(path_p, &st) != 0)
+      return -1;
+    if (!S_ISDIR(st.st_mode)) {
+      errno = EINVAL;
+      return -1;
+    }
+    if (le->lacl_base != 0) {
+      errno = EINVAL; // not a default-ACL handle
+      return -1;
+    }
+    if (le->lacl_data.aclb_entry.acl_entnum <= 0) {
+      int rc = __acl_delete_file_le(epath, ACL_FILDEF);
+      if (rc == 0 && type == ACL_DIRDEF)
+        rc = __acl_delete_file_le(epath, ACL_DIRDEF);
+      return rc;
+    }
+    int rc = __acl_set_file_le(epath, ACL_FILDEF, le, ACL_ADD, NULL);
+    if (rc == 0 && type == ACL_DIRDEF)
+      rc = __acl_set_file_le(epath, ACL_DIRDEF, le, ACL_ADD, NULL);
+    return rc;
+  }
 
   struct ACL *hdr = &le->lacl_data.aclb_entry;
   int empty = hdr->acl_entnum <= 0;
@@ -708,13 +781,39 @@ struct zos_acl_handle *__acl_from_text(const char *buf_p) {
   if (rc != 0)
     return NULL; // errno set by the parser
 
-  // The POSIX text form carries a single access ACL; default tags are
-  // not part of it.
-  if (set.acls_data[0] == NULL || set.acls_data[1] != NULL ||
-      set.acls_data[2] != NULL) {
+  int access_set = set.acls_data[0] != NULL;
+  int file_default_set = set.acls_data[1] != NULL;
+  int dir_default_set = set.acls_data[2] != NULL;
+
+  if (access_set && (file_default_set || dir_default_set)) {
+    // Mixing access and default entries is ambiguous.
     for (int i = 0; i < 3; i++)
       if (set.acls_data[i] != NULL)
         __acl_free_le(set.acls_data[i]);
+    errno = EINVAL;
+    return NULL;
+  }
+
+  if (file_default_set || dir_default_set) {
+    // A default-ACL handle, from default: or fdefault: tagged entries.
+    // A default ACL has no base entries.
+    if (file_default_set && dir_default_set) {
+      for (int i = 0; i < 3; i++)
+        if (set.acls_data[i] != NULL)
+          __acl_free_le(set.acls_data[i]);
+      errno = EINVAL; // both default kinds in one text
+      return NULL;
+    }
+    lacl_t acl = file_default_set ? set.acls_data[1] : set.acls_data[2];
+    if (acl->lacl_base != 0 || __acl_valid_le(acl, NULL) != 0) {
+      __acl_free_le(acl);
+      errno = EINVAL;
+      return NULL;
+    }
+    return zos_acl_publish_as(acl, 1);
+  }
+
+  if (set.acls_data[0] == NULL) {
     errno = EINVAL;
     return NULL;
   }
@@ -741,15 +840,18 @@ char *__acl_to_text(struct zos_acl_handle *acl, ssize_t *len_p) {
   // The LE acl_to_text() emits the extended entries only (and returns
   // NULL for a handle without any); the base entries are rendered here
   // so that the text form carries the whole ACL and round-trips
-  // through acl_from_text().
+  // through acl_from_text().  A default-ACL handle has no base
+  // entries — LE rejects them — and renders its entries only.
   char base[64];
   int off = 0;
-  static const char *names[3] = {"user", "group", "other"};
-  for (int i = 0; i < 3; i++) {
-    int perm = ACL_PERM(&le->lacl_base_entry[i]);
-    off += snprintf(base + off, sizeof(base) - off, "%s%s::%c%c%c",
-                    i > 0 ? "," : "", names[i], (perm & 04) ? 'r' : '-',
-                    (perm & 02) ? 'w' : '-', (perm & 01) ? 'x' : '-');
+  if (!acl->zh_default) {
+    static const char *names[3] = {"user", "group", "other"};
+    for (int i = 0; i < 3; i++) {
+      int perm = ACL_PERM(&le->lacl_base_entry[i]);
+      off += snprintf(base + off, sizeof(base) - off, "%s%s::%c%c%c",
+                      i > 0 ? "," : "", names[i], (perm & 04) ? 'r' : '-',
+                      (perm & 02) ? 'w' : '-', (perm & 01) ? 'x' : '-');
+    }
   }
 
   ssize_t ext_len = 0;

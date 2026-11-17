@@ -137,7 +137,8 @@ struct zos_acl_entry_desc {
 struct zos_acl_handle {
     lacl_t zh_le;			   // z/OS working storage
     int zh_cursor;			   // iteration state
-    struct zos_acl_entry_desc zh_desc[1]; // 3 + entries descriptors
+    int zh_default;			   // set for a default-ACL handle
+    struct zos_acl_entry_desc zh_desc[1]; // base + entries descriptors
 };
 
 // Opaque handle to the ACL of a file.
@@ -207,10 +208,16 @@ __Z_EXPORT extern void *__acl_get_qualifier(struct zos_acl_entry_desc *entry_d);
 /**
  * Retrieves the ACL of the file "path_p".
  * \param [in] path_p file name, in ASCII.
- * \param [in] type must be ACL_TYPE_ACCESS.
+ * \param [in] type ACL_TYPE_ACCESS, or ACL_TYPE_DEFAULT for the
+ *   default ACL of a directory.
  * \return a handle in allocated memory; a file without extended ACL
  *   entries yields a handle without entries.  NULL only on error
- *   (errno is set).
+ *   (errno is set).  For ACL_TYPE_DEFAULT the path must be an
+ *   existing directory: it yields a handle without entries when it
+ *   carries no default ACL.  z/OS has two default ACL types (file and
+ *   directory default); the handle carries the file default when one
+ *   is stored, the directory default otherwise, and ACL_FILDEF
+ *   retrieves the file default alone.  Anything else gets EINVAL.
  */
 __Z_EXPORT extern acl_t acl_get_file(const char *path_p, acl_type_t type)
     __asm("__acl_get_file");
@@ -222,8 +229,14 @@ __Z_EXPORT extern acl_t acl_get_file(const char *path_p, acl_type_t type)
  * file must already exist.  This also restores the base permissions
  * (owner/group/other) recorded in the ACL.
  * \param [in] path_p file name, in ASCII.
- * \param [in] type must be ACL_TYPE_ACCESS.
- * \param [in] acl handle from acl_get_file(), may be NULL; not modified.
+ * \param [in] type ACL_TYPE_ACCESS, or ACL_TYPE_DEFAULT to set the
+ *   default ACL of a directory: an empty handle removes the
+ *   directory's default ACLs, a handle with entries stores them as
+ *   both the file and the directory default (the POSIX single default
+ *   concept), and ACL_FILDEF stores the file default alone.  A
+ *   default handle carries no base entries.
+ * \param [in] acl handle from acl_get_file(), may be NULL; not
+ *   modified.
  * \return 0 on success, -1 on error (errno is set).
  */
 __Z_EXPORT extern int acl_set_file(const char *path_p, acl_type_t type, acl_t acl)
@@ -264,8 +277,10 @@ __Z_EXPORT extern int acl_set_fd(int fd, acl_t acl)
  * and "type:id:perm" for extended entries, e.g.
  * "user::rw-,group::r--,other::r--,user:123:rwx".  Permissions are
  * rwx, '-' or an octal digit; ids are uid/gid numbers or user names.
- * The text form carries a single access ACL; default tags are
- * rejected.  The resulting handle is validated: text without the
+ * The text form carries a single access ACL, or — as an extension —
+ * entries tagged default: or fdefault:, yielding a default-ACL
+ * handle for acl_set_file(path, ACL_TYPE_DEFAULT, ...).  Mixing
+ * access and default entries is rejected.  The resulting handle is validated: text without the
  * three base entries is rejected with EINVAL (POSIX allows returning
  * an invalid ACL, applying one would set an undefined mode).
  * \param [in] buf_p the ACL text, in ASCII, null terminated.

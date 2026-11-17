@@ -73,6 +73,7 @@ struct zos_acl_obj_header {
 };
 #define ZOS_ACL_HANDLE_TAG    ((size_t)0x5A434C01)
 #define ZOS_ACL_QUALIFIER_TAG ((size_t)0x5A434C02)
+#define ZOS_ACL_TEXT_TAG      ((size_t)0x5A434C03)
 
 // Wraps LE working storage into a published handle with the entry
 // descriptors; takes ownership of "le" (freed on failure).
@@ -590,9 +591,9 @@ int __acl_set_file(const char *path_p, short type, struct zos_acl_handle *acl) {
   return rc;
 }
 
-int __acl_set_fd(int fd, short type, struct zos_acl_handle *acl) {
-  if (fd < 0 || type != ACL_ACCESS || acl == NULL) {
-    if (acl == NULL && fd >= 0 && type == ACL_ACCESS)
+int __acl_set_fd(int fd, struct zos_acl_handle *acl) {
+  if (fd < 0 || acl == NULL) {
+    if (acl == NULL && fd >= 0)
       return 0; // no ACL to apply
     errno = EINVAL;
     return -1;
@@ -608,8 +609,8 @@ int __acl_set_fd(int fd, short type, struct zos_acl_handle *acl) {
   return zos_acl_set_nonempty_fd(fd, le);
 }
 
-struct zos_acl_handle *__acl_get_fd(int fd, short type) {
-  if (fd < 0 || type != ACL_ACCESS) {
+struct zos_acl_handle *__acl_get_fd(int fd) {
+  if (fd < 0) {
     errno = EINVAL;
     return NULL;
   }
@@ -656,7 +657,7 @@ struct zos_acl_handle *__acl_get_fd(int fd, short type) {
   }
 }
 
-lacl_t __acl_from_text(const char *buf_p) {
+struct zos_acl_handle *__acl_from_text(const char *buf_p) {
   if (buf_p == NULL) {
     errno = EINVAL;
     return NULL;
@@ -736,14 +737,20 @@ char *__acl_to_text(struct zos_acl_handle *acl, ssize_t *len_p) {
     free(ext);
     if (etext == NULL)
       return NULL;
+  } else if (le->lacl_data.aclb_entry.acl_entnum > 0) {
+    // The formatter failed although there are extended entries; only a
+    // handle without entries produces empty output.
+    return NULL;
   }
 
   size_t total = strlen(base) + (etext != NULL ? 1 + strlen(etext) : 0);
-  char *text = (char *)malloc(total + 1);
-  if (text == NULL) {
+  char *mem = (char *)malloc(sizeof(struct zos_acl_obj_header) + total + 1);
+  if (mem == NULL) {
     free(etext);
     return NULL;
   }
+  ((struct zos_acl_obj_header *)mem)->oh_tag = ZOS_ACL_TEXT_TAG;
+  char *text = mem + sizeof(struct zos_acl_obj_header);
   snprintf(text, total + 1, "%s%s%s", base, etext != NULL ? "," : "",
            etext != NULL ? etext : "");
   free(etext);
@@ -783,7 +790,7 @@ int __acl_free(void *obj_p) {
     free((char *)obj_p - sizeof(struct zos_acl_obj_header));
     return rc;
   }
-  if (tag == ZOS_ACL_QUALIFIER_TAG) {
+  if (tag == ZOS_ACL_QUALIFIER_TAG || tag == ZOS_ACL_TEXT_TAG) {
     free((char *)obj_p - sizeof(struct zos_acl_obj_header));
     return 0;
   }
@@ -809,17 +816,20 @@ int __acl_get_entry(struct zos_acl_handle *acl, int entry_id,
   return 1;
 }
 
-int __acl_get_tag_type(struct zos_acl_entry_desc *entry_d) {
-  if (entry_d == NULL) {
+int __acl_get_tag_type(struct zos_acl_entry_desc *entry_d, int *tag_type_p) {
+  if (entry_d == NULL || tag_type_p == NULL) {
     errno = EINVAL;
     return -1;
   }
   if (entry_d->ed_index < 3) {
     // The base entries, by position: owner, group, other.
     static const int tags[3] = {ACL_USER_OBJ, ACL_GROUP_OBJ, ACL_OTHER};
-    return tags[entry_d->ed_index];
+    *tag_type_p = tags[entry_d->ed_index];
+  } else {
+    *tag_type_p =
+        zos_acl_entry_real(entry_d)->acle_type == ACL_USER ? ACL_USER : ACL_GROUP;
   }
-  return zos_acl_entry_real(entry_d)->acle_type == ACL_USER ? ACL_USER : ACL_GROUP;
+  return 0;
 }
 
 int __acl_get_permset(struct zos_acl_entry_desc *entry_d,
@@ -832,9 +842,17 @@ int __acl_get_permset(struct zos_acl_entry_desc *entry_d,
   return 0;
 }
 
+// Private permission bit masks, matching the rwx octal digit; the
+// system ACL_READ/... constants are boolean values and are redefined
+// only for the override consumers.
+#define ZOS_ACL_PERM_R 04
+#define ZOS_ACL_PERM_W 02
+#define ZOS_ACL_PERM_X 01
+
 int __acl_get_perm(struct ACL_perm *permset_d, int perm) {
   if (permset_d == NULL ||
-      (perm & ~(ACL_READ | ACL_WRITE | ACL_EXECUTE)) != 0 || perm == 0) {
+      (perm & ~(ZOS_ACL_PERM_R | ZOS_ACL_PERM_W | ZOS_ACL_PERM_X)) != 0 ||
+      perm == 0) {
     errno = EINVAL;
     return -1;
   }

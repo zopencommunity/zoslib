@@ -750,7 +750,7 @@ TEST_F(AclTest, GetFdMatchesGetFile) {
   ASSERT_NE(by_path, (acl_t)NULL);
   int fd = open(src_path_, O_RDONLY);
   ASSERT_GE(fd, 0);
-  acl_t by_fd = acl_get_fd(fd, ACL_TYPE_ACCESS);
+  acl_t by_fd = acl_get_fd(fd);
   close(fd);
   ASSERT_NE(by_fd, (acl_t)NULL);
 
@@ -769,7 +769,7 @@ TEST_F(AclTest, GetFdNoEntries) {
   ASSERT_EQ(chmod(src_path_, 0640), 0);
   int fd = open(src_path_, O_RDONLY);
   ASSERT_GE(fd, 0);
-  acl_t acl = acl_get_fd(fd, ACL_TYPE_ACCESS);
+  acl_t acl = acl_get_fd(fd);
   close(fd);
   ASSERT_NE(acl, (acl_t)NULL);
   EXPECT_EQ(aclEntryCount(acl), 0);
@@ -790,7 +790,7 @@ TEST_F(AclTest, SetFdRoundTrip) {
   ASSERT_NE(acl, (acl_t)NULL);
   int fd = open(dst_path_, O_RDONLY | O_NONBLOCK);
   ASSERT_GE(fd, 0);
-  EXPECT_EQ(acl_set_fd(fd, ACL_TYPE_ACCESS, acl), 0);
+  EXPECT_EQ(acl_set_fd(fd, acl), 0);
   EXPECT_EQ(acl_free(acl), 0);
   // still usable after the update
   EXPECT_EQ(fcntl(fd, F_GETFD), 0);
@@ -819,7 +819,7 @@ TEST_F(AclTest, SetFdEmpty) {
   ASSERT_NE(empty, (acl_t)NULL);
   int fd = open(dst_path_, O_RDONLY | O_NONBLOCK);
   ASSERT_GE(fd, 0);
-  EXPECT_EQ(acl_set_fd(fd, ACL_TYPE_ACCESS, empty), 0);
+  EXPECT_EQ(acl_set_fd(fd, empty), 0);
   EXPECT_EQ(acl_free(empty), 0);
   close(fd);
 
@@ -852,7 +852,7 @@ TEST_F(AclTest, SetFdSetuidRefused) {
   int fd = open(dst_path_, O_RDONLY | O_NONBLOCK);
   ASSERT_GE(fd, 0);
   errno = 0;
-  EXPECT_EQ(acl_set_fd(fd, ACL_TYPE_ACCESS, acl), -1);
+  EXPECT_EQ(acl_set_fd(fd, acl), -1);
   EXPECT_EQ(errno, EPERM);
   EXPECT_EQ(acl_free(acl), 0);
   close(fd);
@@ -946,10 +946,9 @@ TEST_F(AclTest, ToTextRoundTrip) {
   EXPECT_NE(strstr(text, "user::rw-"), (char *)NULL);
   EXPECT_NE(strstr(text, "group::r--"), (char *)NULL);
   EXPECT_NE(strstr(text, "other::---"), (char *)NULL);
-  EXPECT_EQ(acl_free(acl), 0);
 
   acl_t parsed = acl_from_text(text);
-  free(text);
+  acl_free(text);
   ASSERT_NE(parsed, (acl_t)NULL);
   ASSERT_EQ(aclEntryCount(parsed), 1);
   EXPECT_EQ(aclEntry(parsed, 0)->acle_id, getuid());
@@ -960,6 +959,7 @@ TEST_F(AclTest, ToTextRoundTrip) {
     EXPECT_EQ(*(unsigned char *)&parsed->zh_le->lacl_base_entry[i].acle_value,
               *(unsigned char *)&acl->zh_le->lacl_base_entry[i].acle_value);
   EXPECT_EQ(acl_free(parsed), 0);
+  EXPECT_EQ(acl_free(acl), 0); // freed last: the comparison above needs it
 }
 
 // A handle without extended entries renders the base entries only.
@@ -970,7 +970,7 @@ TEST_F(AclTest, ToTextBaseOnly) {
   char *text = acl_to_text(acl, NULL);
   ASSERT_NE(text, (char *)NULL);
   EXPECT_STREQ(text, "user::rw-,group::---,other::---");
-  free(text);
+  acl_free(text);
   EXPECT_EQ(acl_free(acl), 0);
 }
 
@@ -1012,10 +1012,10 @@ TEST_F(AclTest, EntryIteration) {
   int rc = acl_get_entry(acl, ACL_FIRST_ENTRY, &entry);
   ASSERT_EQ(rc, 1);
   int count = 0;
-  int tags[8];
+  acl_tag_t tags[8];
   while (rc == 1) {
     ASSERT_LT(count, 8);
-    tags[count++] = acl_get_tag_type(entry);
+    ASSERT_EQ(acl_get_tag_type(entry, &tags[count++]), 0);
     rc = acl_get_entry(acl, ACL_NEXT_ENTRY, &entry);
   }
   EXPECT_EQ(rc, 0); // exhausted
@@ -1030,7 +1030,9 @@ TEST_F(AclTest, EntryIteration) {
   ASSERT_EQ(acl_get_entry(acl, ACL_NEXT_ENTRY, &entry), 1);
   ASSERT_EQ(acl_get_entry(acl, ACL_NEXT_ENTRY, &entry), 1);
   ASSERT_EQ(acl_get_entry(acl, ACL_NEXT_ENTRY, &entry), 1);
-  EXPECT_EQ(acl_get_tag_type(entry), ACL_USER);
+  acl_tag_t tag;
+  EXPECT_EQ(acl_get_tag_type(entry, &tag), 0);
+  EXPECT_EQ(tag, ACL_USER);
 
   acl_permset_t perms;
   EXPECT_EQ(acl_get_permset(entry, &perms), 0);
@@ -1062,7 +1064,8 @@ TEST_F(AclTest, EntryInvalidArguments) {
   errno = 0;
   EXPECT_EQ(acl_get_entry(acl, 42, &entry), -1);
   EXPECT_EQ(errno, EINVAL);
-  EXPECT_EQ(acl_get_tag_type(NULL), -1);
+  acl_tag_t tag;
+  EXPECT_EQ(acl_get_tag_type(NULL, &tag), -1);
   EXPECT_EQ(acl_free(acl), 0);
 }
 

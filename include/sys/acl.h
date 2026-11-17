@@ -97,7 +97,18 @@
 // The system header typedefs acl_entry_t as "struct ACL_entry *"; the
 // POSIX entry API needs descriptors that know their position in the
 // ACL.  A typedef cannot be redefined — shadow it with a macro.
-#define acl_entry_t struct zos_acl_entry_desc *
+#define acl_entry_t zos_acl_entry_t
+
+// Permission bits for the permset API, matching the rwx octal digit of
+// an entry.  The system header defines these as boolean values for its
+// bitfields; redefined only in override mode, where the native API is
+// hidden anyway.
+#undef ACL_READ
+#undef ACL_WRITE
+#undef ACL_EXECUTE
+#define ACL_READ    04
+#define ACL_WRITE   02
+#define ACL_EXECUTE 01
 
 #else // !(defined(ZOSLIB_OVERRIDE_CLIB) || defined(ZOSLIB_OVERRIDE_CLIB_ACL))
 
@@ -111,6 +122,12 @@
 // descriptors index the base entries (owner, group, other) as 0..2 and
 // the extended entries as 3..., which is what distinguishes the POSIX
 // object tags from the extended ones.
+// The entry descriptor pointer; acl_entry_t is shadowed by a macro in
+// the override section, because the system header typedefs that name
+// differently and a typedef cannot be redefined.  The macro expands to
+// this typedef so that "acl_entry_t a, b;" declares two pointers.
+typedef struct zos_acl_entry_desc *zos_acl_entry_t;
+
 // One ACL entry: the handle it belongs to and the entry index.
 struct zos_acl_entry_desc {
     struct zos_acl_handle *ed_acl;
@@ -145,12 +162,7 @@ typedef struct ACL_perm *acl_permset_t;
 
 // Permission bits for the permset API, matching the rwx octal digit of
 // an entry.  The system header defines these as 1; redefined here.
-#undef ACL_READ
-#undef ACL_WRITE
-#undef ACL_EXECUTE
-#define ACL_READ    04
-#define ACL_WRITE   02
-#define ACL_EXECUTE 01
+
 
 #ifdef __cplusplus
 extern "C" {
@@ -164,14 +176,15 @@ __Z_EXPORT extern struct zos_acl_handle *__acl_get_file(const char *path_p,
 __Z_EXPORT extern int __acl_set_file(const char *path_p, short type,
                                      struct zos_acl_handle *acl);
 __Z_EXPORT extern int __acl_free(void *obj_p);
-__Z_EXPORT extern struct zos_acl_handle *__acl_get_fd(int fd, short type);
-__Z_EXPORT extern int __acl_set_fd(int fd, short type, struct zos_acl_handle *acl);
-__Z_EXPORT extern lacl_t __acl_from_text(const char *buf_p);
+__Z_EXPORT extern struct zos_acl_handle *__acl_get_fd(int fd);
+__Z_EXPORT extern int __acl_set_fd(int fd, struct zos_acl_handle *acl);
+__Z_EXPORT extern struct zos_acl_handle *__acl_from_text(const char *buf_p);
 __Z_EXPORT extern char *__acl_to_text(struct zos_acl_handle *acl, ssize_t *len_p);
 __Z_EXPORT extern int __acl_delete_def_file(const char *path_p);
 __Z_EXPORT extern int __acl_get_entry(struct zos_acl_handle *acl, int entry_id,
                                       struct zos_acl_entry_desc **entry_p);
-__Z_EXPORT extern int __acl_get_tag_type(struct zos_acl_entry_desc *entry_d);
+__Z_EXPORT extern int __acl_get_tag_type(struct zos_acl_entry_desc *entry_d,
+                                        int *tag_type_p);
 __Z_EXPORT extern int __acl_get_permset(struct zos_acl_entry_desc *entry_d,
                                         struct ACL_perm **permset_p);
 __Z_EXPORT extern int __acl_get_perm(struct ACL_perm *permset_d, int perm);
@@ -226,13 +239,11 @@ __Z_EXPORT extern int acl_free(void *obj_p) __asm("__acl_free");
 /**
  * Retrieves the ACL of the file referred to by the descriptor "fd".
  * \param [in] fd file descriptor pinned to the file.
- * \param [in] type must be ACL_TYPE_ACCESS.
  * \return a handle in allocated memory; a file without extended ACL
  *   entries yields a handle without entries.  NULL only on error
  *   (errno is set).
  */
-__Z_EXPORT extern acl_t acl_get_fd(int fd, acl_type_t type)
-    __asm("__acl_get_fd");
+__Z_EXPORT extern acl_t acl_get_fd(int fd) __asm("__acl_get_fd");
 
 /**
  * Applies an ACL previously retrieved with acl_get_file() or
@@ -240,12 +251,11 @@ __Z_EXPORT extern acl_t acl_get_fd(int fd, acl_type_t type)
  * the same semantics as acl_set_file().  The descriptor belongs to
  * the caller and is not closed.
  * \param [in] fd file descriptor pinned to the file.
- * \param [in] type must be ACL_TYPE_ACCESS.
  * \param [in] acl handle from acl_get_file()/acl_get_fd()/
  *   acl_from_text(), may be NULL; not modified.
  * \return 0 on success, -1 on error (errno is set).
  */
-__Z_EXPORT extern int acl_set_fd(int fd, acl_type_t type, acl_t acl)
+__Z_EXPORT extern int acl_set_fd(int fd, acl_t acl)
     __asm("__acl_set_fd");
 
 /**
@@ -273,8 +283,8 @@ __Z_EXPORT extern acl_t acl_from_text(const char *buf_p) __asm("__acl_from_text"
  *   acl_from_text(); not modified.
  * \param [out] len_p if not NULL, receives the text length excluding
  *   the null terminator.
- * \return the text in allocated memory, to be released with free(),
- *   or NULL on error (errno is set).
+ * \return the text in allocated memory, to be released with
+ *   acl_free(), or NULL on error (errno is set).
  */
 __Z_EXPORT extern char *acl_to_text(acl_t acl, ssize_t *len_p)
     __asm("__acl_to_text");
@@ -305,12 +315,19 @@ __Z_EXPORT extern int acl_delete_def_file(const char *path_p)
 __Z_EXPORT extern int acl_get_entry(acl_t acl, int entry_id,
                                     acl_entry_t *entry_p) __asm("__acl_get_entry");
 
+// The tag type of an ACL entry.
+typedef int acl_tag_t;
+
 /**
- * Returns the tag type of an entry: ACL_USER_OBJ, ACL_GROUP_OBJ or
+ * Obtains the tag type of an entry: ACL_USER_OBJ, ACL_GROUP_OBJ or
  * ACL_OTHER for the base entries, ACL_USER or ACL_GROUP for the
  * extended ones.
+ * \param [in] entry_d the entry descriptor.
+ * \param [out] tag_type_p receives the tag type.
+ * \return 0 on success, -1 on error (errno is set).
  */
-__Z_EXPORT extern int acl_get_tag_type(acl_entry_t entry_d)
+__Z_EXPORT extern int acl_get_tag_type(acl_entry_t entry_d,
+                                       acl_tag_t *tag_type_p)
     __asm("__acl_get_tag_type");
 
 /**

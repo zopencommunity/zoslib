@@ -1086,6 +1086,16 @@ TEST_F(AclTest, PermsetOfBaseEntries) {
   errno = 0;
   EXPECT_EQ(acl_get_perm(perms, 0777), -1); // not a single permission
   EXPECT_EQ(errno, EINVAL);
+  // Combined permission bits are not a single permission either.
+  errno = 0;
+  EXPECT_EQ(acl_get_perm(perms, ACL_READ | ACL_WRITE), -1);
+  EXPECT_EQ(errno, EINVAL);
+  errno = 0;
+  EXPECT_EQ(acl_get_perm(perms, ACL_READ | ACL_EXECUTE), -1);
+  EXPECT_EQ(errno, EINVAL);
+  errno = 0;
+  EXPECT_EQ(acl_get_perm(perms, ACL_READ | ACL_WRITE | ACL_EXECUTE), -1);
+  EXPECT_EQ(errno, EINVAL);
   EXPECT_EQ(acl_free(acl), 0);
 }
 

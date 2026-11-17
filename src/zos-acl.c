@@ -851,9 +851,9 @@ int __acl_get_permset(struct zos_acl_entry_desc *entry_d,
 
 int __acl_get_perm(struct ACL_perm *permset_d, int perm) {
   if (permset_d == NULL ||
-      (perm & ~(ZOS_ACL_PERM_R | ZOS_ACL_PERM_W | ZOS_ACL_PERM_X)) != 0 ||
-      perm == 0) {
-    errno = EINVAL;
+      (perm != ZOS_ACL_PERM_R && perm != ZOS_ACL_PERM_W &&
+       perm != ZOS_ACL_PERM_X)) {
+    errno = EINVAL; // not one of the three permissions
     return -1;
   }
   return (*(unsigned char *)permset_d & perm) == perm ? 1 : 0;

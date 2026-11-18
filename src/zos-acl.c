@@ -28,6 +28,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -43,6 +44,8 @@
 // digit.
 #define ACL_PERM(e) (*(unsigned char *)&(e)->acle_value & 07)
 
+
+
 // Entry points of the z/OS LE ACL library.
 extern lacl_t __acl_init_le(int count) asm("@@LINIT");
 extern int __acl_get_file_le(const char *path_p, short type_d, lacl_t acl_d,
@@ -56,6 +59,68 @@ extern int __acl_set_fd_le(int fd, short type_d, lacl_t acl_d, short op_type,
                            void *entry_p) asm("@@LSFD");
 extern int __acl_delete_fd_le(int fd, short type_d) asm("@@LDFD");
 extern int __acl_valid_le(lacl_t acl_d, void *entry_p) asm("@@LVALID");
+extern int __le_acl_from_text(const char *buf_p, short op_type, acl_all_t set_ptr,
+                              char **ret) asm("@@LFTEXT");
+extern char *__le_acl_to_text(const lacl_t acl_d, ssize_t *len_p, short type_d,
+                              char delim) asm("@@LTTEXT");
+
+// Every object released through acl_free() — a handle or a qualifier —
+// carries this header in front of the pointer the caller holds, so
+// that acl_free() can tell them apart.  The size_t keeps the payload
+// aligned.
+struct zos_acl_obj_header {
+    size_t oh_tag;
+};
+#define ZOS_ACL_HANDLE_TAG    ((size_t)0x5A434C01)
+#define ZOS_ACL_QUALIFIER_TAG ((size_t)0x5A434C02)
+#define ZOS_ACL_TEXT_TAG      ((size_t)0x5A434C03)
+
+// Wraps LE working storage into a published handle with the entry
+// descriptors; takes ownership of "le" (freed on failure).  The base
+// entries are counted from lacl_base: an access ACL always has three,
+// a default-ACL handle has none.
+static struct zos_acl_handle *zos_acl_publish_as(lacl_t le, int is_default) {
+  if (le == NULL)
+    return NULL;
+  int n = le->lacl_base + le->lacl_data.aclb_entry.acl_entnum;
+  char *mem =
+      (char *)malloc(sizeof(struct zos_acl_obj_header) +
+                     sizeof(struct zos_acl_handle) +
+                     (size_t)(n - 1) * sizeof(struct zos_acl_entry_desc));
+  if (mem == NULL) {
+    __acl_free_le(le);
+    return NULL;
+  }
+  ((struct zos_acl_obj_header *)mem)->oh_tag = ZOS_ACL_HANDLE_TAG;
+  struct zos_acl_handle *h =
+      (struct zos_acl_handle *)(mem + sizeof(struct zos_acl_obj_header));
+  h->zh_le = le;
+  h->zh_cursor = 0;
+  h->zh_default = is_default;
+  for (int i = 0; i < n; i++) {
+    h->zh_desc[i].ed_acl = h;
+    // The entry accessors use a fixed coordinate system: indices 0-2
+    // are the base entries, 3 and beyond the extended entries.  Keep
+    // the descriptors there even when the handle has no base entries,
+    // so that a default handle's entries are not mistaken for base
+    // entries.
+    h->zh_desc[i].ed_index = i < le->lacl_base ? i : i - le->lacl_base + 3;
+  }
+  return h;
+}
+
+static struct zos_acl_handle *zos_acl_publish(lacl_t le) {
+  return zos_acl_publish_as(le, 0);
+}
+
+// The real entry an entry descriptor refers to.
+static struct ACL_entry *zos_acl_entry_real(struct zos_acl_entry_desc *entry) {
+  lacl_t le = entry->ed_acl->zh_le;
+  if (entry->ed_index < 3)
+    return (struct ACL_entry *)&le->lacl_base_entry[entry->ed_index];
+  return (struct ACL_entry *)((char *)&le->lacl_data + sizeof(struct ACL_buf))
+         + (entry->ed_index - 3);
+}
 
 // Upper bound of ACL entries to retrieve; RACF and the file system
 // regulate the real limit.
@@ -106,15 +171,74 @@ static int zos_acl_initial_count = 16;
 
 __Z_EXPORT void __acl_set_initial_count(int count) { zos_acl_initial_count = count; }
 
-lacl_t __acl_get_file(const char *path_p, short type) {
-  if (path_p == NULL || type != ACL_ACCESS) {
-    errno = EINVAL; // z/OS has no default ACLs
+struct zos_acl_handle *__acl_get_file(const char *path_p, short type) {
+  if (path_p == NULL) {
+    errno = EINVAL;
     return NULL;
   }
 
   char epath[1024];
   if (zos_acl_path_a2e(path_p, epath, sizeof(epath)) != 0)
     return NULL;
+
+  if (type == ACL_DIRDEF || type == ACL_FILDEF) {
+    // The default ACL of a directory.  A directory without one yields
+    // a handle without entries — Linux behaves the same way, and
+    // gnulib's copy-acl relies on it: the empty handle is trivial and
+    // routes to acl_delete_def_file() on the destination.  z/OS has
+    // two default ACL types: the handle carries the file default when
+    // one is stored, the directory default otherwise; ACL_FILDEF
+    // retrieves the file default alone.  A non-directory has no
+    // default ACL at all.
+    struct stat st;
+    if (stat(path_p, &st) != 0)
+      return NULL;
+    if (!S_ISDIR(st.st_mode)) {
+      errno = EINVAL;
+      return NULL;
+    }
+
+    static const short types[] = {ACL_FILDEF, ACL_DIRDEF};
+    int ntypes = type == ACL_FILDEF ? 1 : 2;
+    for (int t = 0; t < ntypes; t++) {
+      for (int count = zos_acl_initial_count;; count *= 8) {
+        if (count > ZOS_ACL_MAX_ENTRIES)
+          count = ZOS_ACL_MAX_ENTRIES;
+
+        lacl_t acl = __acl_init_le(count);
+        if (acl == NULL)
+          return NULL;
+
+        int num = 0;
+        if (__acl_get_file_le(epath, types[t], acl, &num) == 0) {
+          if (acl->lacl_data.aclb_entry.acl_entnum > 0)
+            return zos_acl_publish_as(acl, 1);
+          __acl_free_le(acl);
+          break; // this type carries nothing, try the next
+        }
+
+        int save_errno = errno;
+        __acl_free_le(acl);
+        errno = save_errno;
+        if (errno == E2BIG && count != ZOS_ACL_MAX_ENTRIES)
+          continue; // grow the storage
+        if (errno != ENOENT)
+          return NULL; // a real retrieval error
+        break; // nothing of this type, try the next
+      }
+    }
+
+    lacl_t empty = __acl_init_le(3);
+    if (empty == NULL)
+      return NULL;
+    empty->lacl_base = 0; // no base entries: a default ACL has none
+    return zos_acl_publish_as(empty, 1);
+  }
+
+  if (type != ACL_ACCESS) {
+    errno = EINVAL;
+    return NULL;
+  }
 
   // Grow the working storage on E2BIG, up to the maximum.
   int count = zos_acl_initial_count;
@@ -134,7 +258,7 @@ lacl_t __acl_get_file(const char *path_p, short type) {
         __acl_free_le(acl);
         return NULL;
       }
-      return acl; // possibly with zero extended entries
+      return zos_acl_publish(acl); // possibly with zero extended entries
     }
 
     if (errno == ENOENT) {
@@ -157,7 +281,7 @@ lacl_t __acl_get_file(const char *path_p, short type) {
               __acl_free_le(acl);
               return NULL;
             }
-            return acl;
+            return zos_acl_publish(acl);
           }
           // Grow the storage like the main loop: the replacement may
           // have more entries than the initial size could hold.
@@ -181,7 +305,7 @@ lacl_t __acl_get_file(const char *path_p, short type) {
         if (pinned_errno == ENOENT) {
           // No extended entries on the pinned inode.
           if (have_fst)
-            return zos_acl_synthesize(fst.st_mode);
+            return zos_acl_publish(zos_acl_synthesize(fst.st_mode));
           return NULL;
         }
         // A real retrieval error (E2BIG, ...), not "no entries":
@@ -195,7 +319,7 @@ lacl_t __acl_get_file(const char *path_p, short type) {
       __acl_free_le(acl);
       struct stat st;
       if (stat(path_p, &st) == 0)
-        return zos_acl_synthesize(st.st_mode);
+        return zos_acl_publish(zos_acl_synthesize(st.st_mode));
       return NULL; // no such file
     }
 
@@ -309,171 +433,95 @@ static int zos_acl_grants(lacl_t acl, uid_t owner_uid, int perm) {
   return 0;
 }
 
-int __acl_set_file(const char *path_p, short type, lacl_t acl) {
-  if (path_p == NULL || type != ACL_ACCESS) {
-    errno = EINVAL;
-    return -1;
-  }
-  if (acl == NULL)
-    return 0;
+// The fd based core of the empty-ACL update.  The descriptor is
+// pinned to the destination inode and owned by the caller.
+// An empty ACL removes the extended ACL of the destination file and
+// restores the base permissions (owner/group/other) of the source.
+// The permissions are first narrowed to the intersection of the old
+// and the new mode, so no intermediate state is broader than either;
+// on failure the old mode and the old extended ACL are restored.  The
+// setuid, setgid and sticky bits are not part of an access ACL and
+// are kept.
+static int zos_acl_set_empty_fd(int fd, lacl_t acl) {
+  mode_t new_mode = 0;
+  for (int i = 0; i < 3; i++)
+    new_mode = (new_mode << 3) | ACL_PERM(&acl->lacl_base_entry[i]);
 
-  char epath[1024];
-  if (zos_acl_path_a2e(path_p, epath, sizeof(epath)) != 0)
-    return -1;
-
-  struct ACL *hdr = &acl->lacl_data.aclb_entry;
-  // An empty ACL removes the extended ACL of the destination file and
-  // restores the base permissions (owner/group/other) of the source.
-  // The update runs through a file descriptor, so a restrictive mode
-  // cannot make the removal or the rollback fail to resolve the path.
-  // The permissions are first narrowed to the intersection of the old
-  // and the new mode, so no intermediate state is broader than either;
-  // on failure the old mode and the old extended ACL are restored.  The
-  // setuid, setgid and sticky bits are not part of an access ACL and
-  // are kept.
-  if (hdr->acl_entnum <= 0) {
-    if (acl->lacl_base != 3)
-      return __acl_delete_file_le(epath, ACL_ACCESS);
-
-    mode_t new_mode = 0;
-    for (int i = 0; i < 3; i++)
-      new_mode = (new_mode << 3) | ACL_PERM(&acl->lacl_base_entry[i]);
-
-    // The special bits are kept; stat() works even for a destination
-    // that cannot be opened.
-    struct stat st;
-    int have_st = stat(path_p, &st) == 0;
-    if (have_st)
-      new_mode |= st.st_mode & (S_ISUID | S_ISGID | S_ISVTX);
-    mode_t old_mode = have_st ? (st.st_mode & 07777) : new_mode;
-
-    // Open the destination first, so a restrictive mode cannot make the
-    // removal or the rollback fail to resolve the path.  O_NONBLOCK
-    // keeps the open from blocking on a FIFO, O_NOCTTY keeps a terminal
-    // destination from becoming the controlling terminal, O_CLOEXEC
-    // keeps the descriptor from leaking into spawned processes.  An already restricted
-    // destination, which the owner cannot open without read permission,
-    // falls back to path based operations.
-    int fd = open(path_p, O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC);
-    if (fd < 0) {
-      // The destination cannot be pinned (no read permission for the
-      // owner).  When it has an extended ACL, removing it first would
-      // briefly grant the access the ACL denies, and a failed update
-      // could not restore it; refuse instead of risking that.  Without
-      // an extended ACL there is nothing to remove and only the mode
-      // is applied.
-      int snap_error = 0;
-      lacl_t saved = zos_acl_get_epath(epath, &snap_error);
-      if (saved != NULL)
-        __acl_free_le(saved);
-      if (snap_error)
-        return -1; // cannot tell: refuse, errno left set
-      if (saved != NULL) {
-        errno = EACCES; // the open failed: the destination is not readable
-        return -1;
-      }
-      // The destination's special bits cannot be applied through the
-      // path: after a concurrent rename they would come from the old
-      // inode, setting setuid/setgid on a replacement executable.
-      // Refuse rather than risk that.
-      if (have_st && (st.st_mode & (S_ISUID | S_ISGID | S_ISVTX)) != 0) {
-        errno = EACCES;
-        return -1;
-      }
-      return chmod(path_p, new_mode & 0777);
-    }
-
-    // The descriptor is pinned; trust it over the earlier stat(), which
-    // may describe a different inode after a rename.  Only the rwx bits
-    // carry over from it; the special bits come from the pinned
-    // descriptor alone.  Without the fstat() neither the new nor the
-    // old mode is known reliably: refuse before modifying anything.
-    struct stat fst;
-    if (fstat(fd, &fst) != 0) {
-      close(fd);
-      return -1;
-    }
-    new_mode = (new_mode & 0777) | (fst.st_mode & (S_ISUID | S_ISGID | S_ISVTX));
-    old_mode = fst.st_mode & 07777;
-
-    // Applying a base mode that grants write to group or other while
-    // the destination carries setuid/setgid would arm privilege on
-    // writable content; chmod on Linux clears the bits in that case.
-    // The old mode counts as well, like in the non-empty branch: a
-    // descriptor opened for writing before the update keeps write
-    // access through the narrowing.  Refuse all of these.
-    if ((new_mode & (S_ISUID | S_ISGID)) != 0 &&
-        ((new_mode & (S_IWGRP | S_IWOTH)) != 0 ||
-         (old_mode & (S_IWGRP | S_IWOTH)) != 0)) {
-      close(fd);
-      errno = EPERM;
-      return -1;
-    }
-
-    // The old extended ACL, restored if the update fails.  When it
-    // cannot be saved, the update is refused: a rollback would not be
-    // able to restore it.  Restoring it needs the LE set request, which
-    // clears the sticky bit: a sticky directory whose saved ACL grants
-    // write and search to non-owners cannot be rolled back safely;
-    // refuse before modifying anything.
-    int snap_error = 0;
-    lacl_t saved = zos_acl_get_fd(fd, &snap_error);
-    if (snap_error) {
-      close(fd);
-      return -1;
-    }
-    if (saved != NULL &&
-        (((new_mode & S_ISVTX) != 0 && S_ISDIR(fst.st_mode) &&
-          zos_acl_grants(saved, fst.st_uid, 03)) ||
-         ((new_mode & (S_ISUID | S_ISGID)) != 0 &&
-          zos_acl_grants(saved, fst.st_uid, 02)))) {
-      __acl_free_le(saved);
-      close(fd);
-      errno = EPERM;
-      return -1;
-    }
-
-    int rc = fchmod(fd, old_mode & new_mode);
-    if (rc == 0) {
-      rc = __acl_delete_fd_le(fd, ACL_ACCESS);
-      if (rc == 0)
-        rc = fchmod(fd, new_mode);
-      if (rc != 0) {
-        // Restore the extended ACL before the mode, so no user gains
-        // access through the mode while the ACL is still missing; if
-        // the ACL cannot be restored, keep the narrow mode.
-        int save_errno = errno;
-        int restored = saved == NULL ||
-                       __acl_set_fd_le(fd, ACL_ACCESS, saved, ACL_ADD, NULL) == 0;
-        if (restored)
-          fchmod(fd, old_mode);
-        errno = save_errno;
-      }
-    }
-    if (saved != NULL)
-      __acl_free_le(saved);
-    close(fd);
-    return rc;
-  }
-
-  // ACL_ADD replaces the destination ACL; ACL_MODIFY would merge.  The
-  // handle is not modified: the masks were normalized on retrieval.
-  // The set request applies the base entries as rwx bits only and
-  // clears the special bits, which are not part of an access ACL.  The
-  // whole update runs through a descriptor pinned to the destination
-  // inode, so the safety checks, the set request and the special-bit
-  // restoration all target the same file even across a concurrent
-  // rename; destinations that cannot be pinned are refused.
-  // A failed open leaves its own errno (ENOENT, EACCES, ...) for the
-  // caller.
-  int fd = open(path_p, O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC);
-  if (fd < 0)
-    return -1;
+  // Only the rwx bits carry over from the handle; the special bits
+  // come from the pinned descriptor alone.  Without the fstat()
+  // neither the new nor the old mode is known reliably: refuse before
+  // modifying anything.
   struct stat fst;
-  if (fstat(fd, &fst) != 0) {
-    close(fd);
+  if (fstat(fd, &fst) != 0)
+    return -1;
+  new_mode = (new_mode & 0777) | (fst.st_mode & (S_ISUID | S_ISGID | S_ISVTX));
+  mode_t old_mode = fst.st_mode & 07777;
+
+  // Applying a base mode that grants write to group or other while
+  // the destination carries setuid/setgid would arm privilege on
+  // writable content; chmod on Linux clears the bits in that case.
+  // The old mode counts as well, like in the non-empty core: a
+  // descriptor opened for writing before the update keeps write
+  // access through the narrowing.  Refuse all of these.
+  if ((new_mode & (S_ISUID | S_ISGID)) != 0 &&
+      ((new_mode & (S_IWGRP | S_IWOTH)) != 0 ||
+       (old_mode & (S_IWGRP | S_IWOTH)) != 0)) {
+    errno = EPERM;
     return -1;
   }
+
+  // The old extended ACL, restored if the update fails.  When it
+  // cannot be saved, the update is refused: a rollback would not be
+  // able to restore it.  Restoring it needs the LE set request, which
+  // clears the sticky bit: a sticky directory whose saved ACL grants
+  // write and search to non-owners cannot be rolled back safely;
+  // refuse before modifying anything.
+  int snap_error = 0;
+  lacl_t saved = zos_acl_get_fd(fd, &snap_error);
+  if (snap_error)
+    return -1;
+  if (saved != NULL &&
+      (((new_mode & S_ISVTX) != 0 && S_ISDIR(fst.st_mode) &&
+        zos_acl_grants(saved, fst.st_uid, 03)) ||
+       ((new_mode & (S_ISUID | S_ISGID)) != 0 &&
+        zos_acl_grants(saved, fst.st_uid, 02)))) {
+    __acl_free_le(saved);
+    errno = EPERM;
+    return -1;
+  }
+
+  int rc = fchmod(fd, old_mode & new_mode);
+  if (rc == 0) {
+    rc = __acl_delete_fd_le(fd, ACL_ACCESS);
+    if (rc == 0)
+      rc = fchmod(fd, new_mode);
+    if (rc != 0) {
+      // Restore the extended ACL before the mode, so no user gains
+      // access through the mode while the ACL is still missing; if
+      // the ACL cannot be restored, keep the narrow mode.
+      int save_errno = errno;
+      int restored = saved == NULL ||
+                     __acl_set_fd_le(fd, ACL_ACCESS, saved, ACL_ADD, NULL) == 0;
+      if (restored)
+        fchmod(fd, old_mode);
+      errno = save_errno;
+    }
+  }
+  if (saved != NULL)
+    __acl_free_le(saved);
+  return rc;
+}
+
+// The fd based core of the non-empty ACL update.  The descriptor is
+// pinned to the destination inode and owned by the caller.
+// ACL_ADD replaces the destination ACL; ACL_MODIFY would merge.  The
+// handle is not modified: the masks were normalized on retrieval.
+// The set request applies the base entries as rwx bits only and
+// clears the special bits, which are not part of an access ACL.
+static int zos_acl_set_nonempty_fd(int fd, lacl_t acl) {
+  struct stat fst;
+  if (fstat(fd, &fst) != 0)
+    return -1;
   mode_t special = fst.st_mode & (S_ISUID | S_ISGID | S_ISVTX);
 
   // A sticky directory whose incoming ACL grants write and search to
@@ -491,7 +539,6 @@ int __acl_set_file(const char *path_p, short type, lacl_t acl) {
       ((special & (S_ISUID | S_ISGID)) != 0 &&
        (zos_acl_grants(acl, fst.st_uid, 02) ||
         (fst.st_mode & (S_IWGRP | S_IWOTH)) != 0))) {
-    close(fd);
     errno = EPERM;
     return -1;
   }
@@ -502,10 +549,8 @@ int __acl_set_file(const char *path_p, short type, lacl_t acl) {
   int snap_error = 0;
   if (special != 0) {
     saved = zos_acl_get_fd(fd, &snap_error);
-    if (snap_error) {
-      close(fd);
+    if (snap_error)
       return -1;
-    }
     // Restoring the saved entries needs the LE set request, which
     // clears the special bits: a sticky directory whose saved ACL
     // grants write and search to non-owners, or a setuid/setgid
@@ -517,7 +562,6 @@ int __acl_set_file(const char *path_p, short type, lacl_t acl) {
          ((special & (S_ISUID | S_ISGID)) != 0 &&
           zos_acl_grants(saved, fst.st_uid, 02)))) {
       __acl_free_le(saved);
-      close(fd);
       errno = EPERM;
       return -1;
     }
@@ -531,7 +575,7 @@ int __acl_set_file(const char *path_p, short type, lacl_t acl) {
     rc = fchmod(fd, base | special);
     if (rc != 0) {
       // Roll back to the old extended entries (or their absence) and
-      // the old mode, like the empty-ACL path does.  The saved entries
+      // the old mode, like the empty-ACL core does.  The saved entries
       // carry the old rwx bits, so restoring them keeps the mode
       // narrow; without saved entries the mode is narrowed first,
       // because the incoming entries may be the only thing denying
@@ -550,7 +594,334 @@ int __acl_set_file(const char *path_p, short type, lacl_t acl) {
   }
   if (saved != NULL)
     __acl_free_le(saved);
+  return rc;
+}
+
+int __acl_set_file(const char *path_p, short type, struct zos_acl_handle *acl) {
+  if (path_p == NULL || acl == NULL) {
+    if (acl == NULL && path_p != NULL &&
+        (type == ACL_ACCESS || type == ACL_DIRDEF || type == ACL_FILDEF))
+      return 0; // no ACL to apply
+    errno = EINVAL;
+    return -1;
+  }
+  if (type != ACL_ACCESS && type != ACL_DIRDEF && type != ACL_FILDEF) {
+    errno = EINVAL;
+    return -1;
+  }
+  lacl_t le = acl->zh_le;
+
+  char epath[1024];
+  if (zos_acl_path_a2e(path_p, epath, sizeof(epath)) != 0)
+    return -1;
+
+  if (type == ACL_DIRDEF || type == ACL_FILDEF) {
+    // Setting the default ACL of a directory: no mode, no special
+    // bits, none of the access-ACL machinery — just the LE request.
+    // An empty handle removes the defaults; a handle with entries is
+    // stored as both the file and the directory default (ACL_FILDEF
+    // stores the file default alone), the POSIX single-default
+    // concept.  A default ACL has no base entries, LE rejects them.
+    struct stat st;
+    if (stat(path_p, &st) != 0)
+      return -1;
+    if (!S_ISDIR(st.st_mode)) {
+      errno = EINVAL;
+      return -1;
+    }
+    if (le->lacl_base != 0) {
+      errno = EINVAL; // not a default-ACL handle
+      return -1;
+    }
+    if (le->lacl_data.aclb_entry.acl_entnum <= 0) {
+      int rc = __acl_delete_file_le(epath, ACL_FILDEF);
+      if (rc == 0 && type == ACL_DIRDEF)
+        rc = __acl_delete_file_le(epath, ACL_DIRDEF);
+      return rc;
+    }
+    int rc = __acl_set_file_le(epath, ACL_FILDEF, le, ACL_ADD, NULL);
+    if (rc == 0 && type == ACL_DIRDEF)
+      rc = __acl_set_file_le(epath, ACL_DIRDEF, le, ACL_ADD, NULL);
+    return rc;
+  }
+
+  if (le->lacl_base != 3) {
+    errno = EINVAL; // not an access-ACL handle (e.g. a default handle)
+    return -1;
+  }
+
+  struct ACL *hdr = &le->lacl_data.aclb_entry;
+  int empty = hdr->acl_entnum <= 0;
+
+  // O_NONBLOCK keeps the open from blocking on a FIFO, O_NOCTTY keeps
+  // a terminal destination from becoming the controlling terminal,
+  // O_CLOEXEC keeps the descriptor from leaking into spawned
+  // processes.  A failed open leaves its own errno (ENOENT, EACCES,
+  // ...) for the caller.
+  int fd = open(path_p, O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC);
+  if (fd < 0) {
+    if (!empty)
+      return -1; // the update needs the pinned descriptor
+    // The destination cannot be pinned (no read permission for the
+    // owner).  When it has an extended ACL, removing it first would
+    // briefly grant the access the ACL denies, and a failed update
+    // could not restore it; refuse instead of risking that.  Without
+    // an extended ACL there is nothing to remove and only the mode
+    // is applied.
+    int snap_error = 0;
+    lacl_t saved = zos_acl_get_epath(epath, &snap_error);
+    if (saved != NULL)
+      __acl_free_le(saved);
+    if (snap_error)
+      return -1; // cannot tell: refuse, errno left set
+    if (saved != NULL) {
+      errno = EACCES; // the open failed: the destination is not readable
+      return -1;
+    }
+    // The destination's special bits cannot be applied through the
+    // path: after a concurrent rename they would come from the old
+    // inode, setting setuid/setgid on a replacement executable.
+    // Refuse rather than risk that.
+    struct stat st;
+    if (stat(path_p, &st) == 0 &&
+        (st.st_mode & (S_ISUID | S_ISGID | S_ISVTX)) != 0) {
+      errno = EACCES;
+      return -1;
+    }
+    mode_t base = 0;
+    for (int i = 0; i < 3; i++)
+      base = (base << 3) | ACL_PERM(&le->lacl_base_entry[i]);
+    return chmod(path_p, base);
+  }
+
+  int rc = empty ? zos_acl_set_empty_fd(fd, le)
+                 : zos_acl_set_nonempty_fd(fd, le);
   close(fd);
+  return rc;
+}
+
+int __acl_set_fd(int fd, struct zos_acl_handle *acl) {
+  if (fd < 0 || acl == NULL) {
+    if (acl == NULL && fd >= 0)
+      return 0; // no ACL to apply
+    errno = EINVAL;
+    return -1;
+  }
+  lacl_t le = acl->zh_le;
+
+  // The descriptor belongs to the caller and is not closed.
+  if (le->lacl_base != 3) {
+    errno = EINVAL; // not an access-ACL handle (e.g. a default handle)
+    return -1;
+  }
+  if (le->lacl_data.aclb_entry.acl_entnum <= 0)
+    return zos_acl_set_empty_fd(fd, le);
+  return zos_acl_set_nonempty_fd(fd, le);
+}
+
+struct zos_acl_handle *__acl_get_fd(int fd) {
+  if (fd < 0) {
+    errno = EINVAL;
+    return NULL;
+  }
+
+  // Grow the working storage on E2BIG, up to the maximum.
+  for (int count = zos_acl_initial_count;; count *= 8) {
+    if (count > ZOS_ACL_MAX_ENTRIES)
+      count = ZOS_ACL_MAX_ENTRIES;
+
+    lacl_t acl = __acl_init_le(count);
+    if (acl == NULL)
+      return NULL;
+
+    int num = 0;
+    if (__acl_get_fd_le(fd, ACL_ACCESS, acl, &num) == 0) {
+      // Validate before the handle is published.
+      if (__acl_valid_le(acl, NULL) != 0) {
+        __acl_free_le(acl);
+        return NULL;
+      }
+      return zos_acl_publish(acl); // possibly with zero extended entries
+    }
+
+    if (errno == ENOENT) {
+      // No extended entries on the pinned inode; the mode comes from
+      // the same descriptor.
+      struct stat fst;
+      int have_fst = fstat(fd, &fst) == 0;
+      __acl_free_le(acl);
+      if (have_fst)
+        return zos_acl_publish(zos_acl_synthesize(fst.st_mode));
+      return NULL;
+    }
+
+    int save_errno = errno;
+    __acl_free_le(acl);
+    errno = save_errno;
+    if (errno != E2BIG)
+      return NULL;
+    if (count == ZOS_ACL_MAX_ENTRIES) {
+      errno = E2BIG; // the ACL has more entries than the maximum
+      return NULL;
+    }
+  }
+}
+
+struct zos_acl_handle *__acl_from_text(const char *buf_p) {
+  if (buf_p == NULL) {
+    errno = EINVAL;
+    return NULL;
+  }
+
+  // The LE parser expects EBCDIC text: comma or newline separated
+  // entries of "type::perm" (base) or "type:id:perm" (extended), with
+  // rwx / '-' / octal permissions and uid, gid or username ids.
+  size_t len = strlen(buf_p);
+  char *ebuf = (char *)malloc(len + 1);
+  if (ebuf == NULL)
+    return NULL;
+  memcpy(ebuf, buf_p, len + 1);
+  __a2e_s(ebuf);
+
+  struct ACL_set set = {NULL, NULL, NULL};
+  char *ret = NULL;
+  int rc = __le_acl_from_text(ebuf, ACL_ADD, &set, &ret);
+  free(ebuf);
+  if (rc != 0)
+    return NULL; // errno set by the parser
+
+  int access_set = set.acls_data[0] != NULL;
+  int file_default_set = set.acls_data[1] != NULL;
+  int dir_default_set = set.acls_data[2] != NULL;
+
+  if (access_set && (file_default_set || dir_default_set)) {
+    // Mixing access and default entries is ambiguous.
+    for (int i = 0; i < 3; i++)
+      if (set.acls_data[i] != NULL)
+        __acl_free_le(set.acls_data[i]);
+    errno = EINVAL;
+    return NULL;
+  }
+
+  if (file_default_set || dir_default_set) {
+    // A default-ACL handle, from default: or fdefault: tagged entries.
+    // A default ACL has no base entries.
+    if (file_default_set && dir_default_set) {
+      for (int i = 0; i < 3; i++)
+        if (set.acls_data[i] != NULL)
+          __acl_free_le(set.acls_data[i]);
+      errno = EINVAL; // both default kinds in one text
+      return NULL;
+    }
+    lacl_t acl = file_default_set ? set.acls_data[1] : set.acls_data[2];
+    if (acl->lacl_base != 0 || __acl_valid_le(acl, NULL) != 0) {
+      __acl_free_le(acl);
+      errno = EINVAL;
+      return NULL;
+    }
+    return zos_acl_publish_as(acl, 1);
+  }
+
+  if (set.acls_data[0] == NULL) {
+    errno = EINVAL;
+    return NULL;
+  }
+
+  lacl_t acl = set.acls_data[0];
+  // Validate before the handle is published: text without the three
+  // base entries parses (acl_valid() does not require them), but the
+  // update paths read the base entries for the mode — reject it.
+  if (acl->lacl_base != 3 || __acl_valid_le(acl, NULL) != 0) {
+    __acl_free_le(acl);
+    errno = EINVAL;
+    return NULL;
+  }
+  return zos_acl_publish(acl);
+}
+
+char *__acl_to_text(struct zos_acl_handle *acl, ssize_t *len_p) {
+  if (acl == NULL) {
+    errno = EINVAL;
+    return NULL;
+  }
+  lacl_t le = acl->zh_le;
+
+  // The LE acl_to_text() emits the extended entries only (and returns
+  // NULL for a handle without any); the base entries are rendered here
+  // so that the text form carries the whole ACL and round-trips
+  // through acl_from_text().  A default-ACL handle has no base
+  // entries — LE rejects them — and renders its entries only.
+  char base[64];
+  int off = 0;
+  base[0] = '\0'; // a default handle has no base entries to render
+  if (!acl->zh_default) {
+    static const char *names[3] = {"user", "group", "other"};
+    for (int i = 0; i < 3; i++) {
+      int perm = ACL_PERM(&le->lacl_base_entry[i]);
+      off += snprintf(base + off, sizeof(base) - off, "%s%s::%c%c%c",
+                      i > 0 ? "," : "", names[i], (perm & 04) ? 'r' : '-',
+                      (perm & 02) ? 'w' : '-', (perm & 01) ? 'x' : '-');
+    }
+  }
+
+  // A default handle is rendered as its kind: the formatter prefixes
+  // the entries with the default tag, so the text round-trips through
+  // acl_from_text() as a default ACL.
+  ssize_t ext_len = 0;
+  char *ext = __le_acl_to_text(le, &ext_len,
+                               acl->zh_default ? (short)ACL_DIRDEF : (short)ACL_ACCESS,
+                               (char)0x6B);
+  char *etext = NULL;
+  if (ext != NULL) {
+    etext = (char *)malloc(ext_len + 1);
+    if (etext != NULL) {
+      memcpy(etext, ext, ext_len);
+      etext[ext_len] = '\0';
+      __e2a_s(etext); // the LE text is EBCDIC
+    }
+    free(ext);
+    if (etext == NULL)
+      return NULL;
+  } else if (le->lacl_data.aclb_entry.acl_entnum > 0) {
+    // The formatter failed although there are extended entries; only a
+    // handle without entries produces empty output.
+    return NULL;
+  }
+
+  int has_base = base[0] != '\0';
+  size_t total = strlen(base)
+                 + (etext != NULL ? (has_base ? 1 : 0) + strlen(etext) : 0);
+  char *mem = (char *)malloc(sizeof(struct zos_acl_obj_header) + total + 1);
+  if (mem == NULL) {
+    free(etext);
+    return NULL;
+  }
+  ((struct zos_acl_obj_header *)mem)->oh_tag = ZOS_ACL_TEXT_TAG;
+  char *text = mem + sizeof(struct zos_acl_obj_header);
+  snprintf(text, total + 1, "%s%s%s", base,
+           etext != NULL && has_base ? "," : "", etext != NULL ? etext : "");
+  free(etext);
+  if (len_p != NULL)
+    *len_p = (ssize_t)total;
+  return text;
+}
+
+int __acl_delete_def_file(const char *path_p) {
+  if (path_p == NULL) {
+    errno = EINVAL;
+    return -1;
+  }
+
+  char epath[1024];
+  if (zos_acl_path_a2e(path_p, epath, sizeof(epath)) != 0)
+    return -1;
+
+  // z/OS has two default ACL types (file and directory default); the
+  // POSIX "default" concept covers both, remove them all.  Deleting a
+  // default ACL that does not exist is not an error.
+  int rc = __acl_delete_file_le(epath, ACL_FILDEF);
+  if (rc == 0)
+    rc = __acl_delete_file_le(epath, ACL_DIRDEF);
   return rc;
 }
 
@@ -559,5 +930,93 @@ int __acl_free(void *obj_p) {
     errno = EINVAL;
     return -1;
   }
-  return __acl_free_le((lacl_t)obj_p);
+  size_t tag = ((struct zos_acl_obj_header *)obj_p)[-1].oh_tag;
+  if (tag == ZOS_ACL_HANDLE_TAG) {
+    struct zos_acl_handle *h = (struct zos_acl_handle *)obj_p;
+    int rc = __acl_free_le(h->zh_le);
+    free((char *)obj_p - sizeof(struct zos_acl_obj_header));
+    return rc;
+  }
+  if (tag == ZOS_ACL_QUALIFIER_TAG || tag == ZOS_ACL_TEXT_TAG) {
+    free((char *)obj_p - sizeof(struct zos_acl_obj_header));
+    return 0;
+  }
+  errno = EINVAL; // not an object of this API
+  return -1;
+}
+
+int __acl_get_entry(struct zos_acl_handle *acl, int entry_id,
+                    struct zos_acl_entry_desc **entry_p) {
+  if (acl == NULL || entry_p == NULL ||
+      (entry_id != ACL_FIRST_ENTRY && entry_id != ACL_NEXT_ENTRY)) {
+    errno = EINVAL;
+    return -1;
+  }
+  int n = acl->zh_le->lacl_base + acl->zh_le->lacl_data.aclb_entry.acl_entnum;
+  if (entry_id == ACL_FIRST_ENTRY)
+    acl->zh_cursor = 0;
+  if (acl->zh_cursor >= n) {
+    *entry_p = NULL;
+    return 0; // no more entries
+  }
+  *entry_p = &acl->zh_desc[acl->zh_cursor++];
+  return 1;
+}
+
+int __acl_get_tag_type(struct zos_acl_entry_desc *entry_d, int *tag_type_p) {
+  if (entry_d == NULL || tag_type_p == NULL) {
+    errno = EINVAL;
+    return -1;
+  }
+  if (entry_d->ed_index < 3) {
+    // The base entries, by position: owner, group, other.
+    static const int tags[3] = {ACL_USER_OBJ, ACL_GROUP_OBJ, ACL_OTHER};
+    *tag_type_p = tags[entry_d->ed_index];
+  } else {
+    *tag_type_p =
+        zos_acl_entry_real(entry_d)->acle_type == ACL_USER ? ACL_USER : ACL_GROUP;
+  }
+  return 0;
+}
+
+int __acl_get_permset(struct zos_acl_entry_desc *entry_d,
+                      struct ACL_perm **permset_p) {
+  if (entry_d == NULL || permset_p == NULL) {
+    errno = EINVAL;
+    return -1;
+  }
+  *permset_p = &zos_acl_entry_real(entry_d)->acle_value;
+  return 0;
+}
+
+// Private permission bit masks, matching the rwx octal digit; the
+// system ACL_READ/... constants are boolean values and are redefined
+// only for the override consumers.
+#define ZOS_ACL_PERM_R 04
+#define ZOS_ACL_PERM_W 02
+#define ZOS_ACL_PERM_X 01
+
+int __acl_get_perm(struct ACL_perm *permset_d, int perm) {
+  if (permset_d == NULL ||
+      (perm != ZOS_ACL_PERM_R && perm != ZOS_ACL_PERM_W &&
+       perm != ZOS_ACL_PERM_X)) {
+    errno = EINVAL; // not one of the three permissions
+    return -1;
+  }
+  return (*(unsigned char *)permset_d & perm) == perm ? 1 : 0;
+}
+
+void *__acl_get_qualifier(struct zos_acl_entry_desc *entry_d) {
+  if (entry_d == NULL || entry_d->ed_index < 3) {
+    errno = EINVAL; // the base entries have no qualifier
+    return NULL;
+  }
+  char *mem = (char *)malloc(sizeof(struct zos_acl_obj_header) +
+                             sizeof(uid_t));
+  if (mem == NULL)
+    return NULL;
+  ((struct zos_acl_obj_header *)mem)->oh_tag = ZOS_ACL_QUALIFIER_TAG;
+  uid_t *id = (uid_t *)(mem + sizeof(struct zos_acl_obj_header));
+  *id = (uid_t)zos_acl_entry_real(entry_d)->acle_id;
+  return id;
 }

@@ -113,6 +113,25 @@ static struct zos_acl_handle *zos_acl_publish(lacl_t le) {
   return zos_acl_publish_as(le, 0);
 }
 
+// Do two default-ACL working storages carry the same entries?  (A
+// default ACL has no base entries, only extended ones.)
+static int default_acls_equal(lacl_t a, lacl_t b) {
+  struct ACL *ha = &a->lacl_data.aclb_entry;
+  struct ACL *hb = &b->lacl_data.aclb_entry;
+  if (ha->acl_entnum != hb->acl_entnum)
+    return 0;
+  struct ACL_entry *ea =
+      (struct ACL_entry *)((char *)&a->lacl_data + sizeof(struct ACL_buf));
+  struct ACL_entry *eb =
+      (struct ACL_entry *)((char *)&b->lacl_data + sizeof(struct ACL_buf));
+  for (int i = 0; i < ha->acl_entnum; i++)
+    if (ea[i].acle_type != eb[i].acle_type
+        || ea[i].acle_id != eb[i].acle_id
+        || *(unsigned char *)&ea[i].acle_value != *(unsigned char *)&eb[i].acle_value)
+      return 0;
+  return 1;
+}
+
 // The real entry an entry descriptor refers to.
 static struct ACL_entry *zos_acl_entry_real(struct zos_acl_entry_desc *entry) {
   lacl_t le = entry->ed_acl->zh_le;
@@ -200,6 +219,7 @@ struct zos_acl_handle *__acl_get_file(const char *path_p, short type) {
 
     static const short types[] = {ACL_FILDEF, ACL_DIRDEF};
     int ntypes = type == ACL_FILDEF ? 1 : 2;
+    lacl_t stored[2] = {NULL, NULL};
     for (int t = 0; t < ntypes; t++) {
       for (int count = zos_acl_initial_count;; count *= 8) {
         if (count > ZOS_ACL_MAX_ENTRIES)
@@ -207,14 +227,15 @@ struct zos_acl_handle *__acl_get_file(const char *path_p, short type) {
 
         lacl_t acl = __acl_init_le(count);
         if (acl == NULL)
-          return NULL;
+          goto cleanup_fail;
 
         int num = 0;
         if (__acl_get_file_le(epath, types[t], acl, &num) == 0) {
           if (acl->lacl_data.aclb_entry.acl_entnum > 0)
-            return zos_acl_publish_as(acl, 1);
-          __acl_free_le(acl);
-          break; // this type carries nothing, try the next
+            stored[t] = acl;
+          else
+            __acl_free_le(acl);
+          break; // got this type (or it is empty), try the next
         }
 
         int save_errno = errno;
@@ -223,16 +244,44 @@ struct zos_acl_handle *__acl_get_file(const char *path_p, short type) {
         if (errno == E2BIG && count != ZOS_ACL_MAX_ENTRIES)
           continue; // grow the storage
         if (errno != ENOENT)
-          return NULL; // a real retrieval error
+          goto cleanup_fail; // a real retrieval error
         break; // nothing of this type, try the next
       }
     }
+
+    // A POSIX default ACL is one template; z/OS has two (for files and
+    // directories created inside).  One handle cannot represent two
+    // different templates — refuse the lossy round-trip.
+    if (stored[0] != NULL && stored[1] != NULL
+        && !default_acls_equal(stored[0], stored[1]))
+    {
+      __acl_free_le(stored[0]);
+      __acl_free_le(stored[1]);
+      errno = EINVAL;
+      return NULL;
+    }
+
+    if (stored[0] != NULL)
+    {
+      if (stored[1] != NULL)
+        __acl_free_le(stored[1]);
+      return zos_acl_publish_as(stored[0], 1);
+    }
+    if (stored[1] != NULL)
+      return zos_acl_publish_as(stored[1], 1);
 
     lacl_t empty = __acl_init_le(3);
     if (empty == NULL)
       return NULL;
     empty->lacl_base = 0; // no base entries: a default ACL has none
     return zos_acl_publish_as(empty, 1);
+
+cleanup_fail:
+    if (stored[0] != NULL)
+      __acl_free_le(stored[0]);
+    if (stored[1] != NULL)
+      __acl_free_le(stored[1]);
+    return NULL;
   }
 
   if (type != ACL_ACCESS) {
@@ -617,31 +666,45 @@ int __acl_set_file(const char *path_p, short type, struct zos_acl_handle *acl) {
 
   if (type == ACL_DIRDEF || type == ACL_FILDEF) {
     // Setting the default ACL of a directory: no mode, no special
-    // bits, none of the access-ACL machinery — just the LE request.
-    // An empty handle removes the defaults; a handle with entries is
-    // stored as both the file and the directory default (ACL_FILDEF
-    // stores the file default alone), the POSIX single-default
-    // concept.  A default ACL has no base entries, LE rejects them.
-    struct stat st;
-    if (stat(path_p, &st) != 0)
-      return -1;
-    if (!S_ISDIR(st.st_mode)) {
-      errno = EINVAL;
-      return -1;
-    }
+    // bits, none of the access-ACL machinery — just the LE requests,
+    // pinned to the directory inode so a concurrent rename cannot
+    // update different directories' defaults.  An empty handle removes
+    // the defaults; a handle with entries is stored as both the file
+    // and the directory default (ACL_FILDEF stores the file default
+    // alone), the POSIX single-default concept.  A default ACL has no
+    // base entries, LE rejects them.
     if (le->lacl_base != 0) {
       errno = EINVAL; // not a default-ACL handle
       return -1;
     }
-    if (le->lacl_data.aclb_entry.acl_entnum <= 0) {
-      int rc = __acl_delete_file_le(epath, ACL_FILDEF);
-      if (rc == 0 && type == ACL_DIRDEF)
-        rc = __acl_delete_file_le(epath, ACL_DIRDEF);
-      return rc;
+
+    // A failed open leaves its own errno (ENOENT, EACCES, ...).
+    int fd = open(path_p, O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC);
+    if (fd < 0)
+      return -1;
+    struct stat st;
+    if (fstat(fd, &st) != 0)
+    {
+      close(fd);
+      return -1;
     }
-    int rc = __acl_set_file_le(epath, ACL_FILDEF, le, ACL_ADD, NULL);
-    if (rc == 0 && type == ACL_DIRDEF)
-      rc = __acl_set_file_le(epath, ACL_DIRDEF, le, ACL_ADD, NULL);
+    if (!S_ISDIR(st.st_mode)) {
+      close(fd);
+      errno = EINVAL;
+      return -1;
+    }
+
+    int rc;
+    if (le->lacl_data.aclb_entry.acl_entnum <= 0) {
+      rc = __acl_delete_fd_le(fd, ACL_FILDEF);
+      if (rc == 0 && type == ACL_DIRDEF)
+        rc = __acl_delete_fd_le(fd, ACL_DIRDEF);
+    } else {
+      rc = __acl_set_fd_le(fd, ACL_FILDEF, le, ACL_ADD, NULL);
+      if (rc == 0 && type == ACL_DIRDEF)
+        rc = __acl_set_fd_le(fd, ACL_DIRDEF, le, ACL_ADD, NULL);
+    }
+    close(fd);
     return rc;
   }
 

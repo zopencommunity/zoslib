@@ -99,7 +99,12 @@ static struct zos_acl_handle *zos_acl_publish_as(lacl_t le, int is_default) {
   h->zh_default = is_default;
   for (int i = 0; i < n; i++) {
     h->zh_desc[i].ed_acl = h;
-    h->zh_desc[i].ed_index = i;
+    // The entry accessors use a fixed coordinate system: indices 0-2
+    // are the base entries, 3 and beyond the extended entries.  Keep
+    // the descriptors there even when the handle has no base entries,
+    // so that a default handle's entries are not mistaken for base
+    // entries.
+    h->zh_desc[i].ed_index = i < le->lacl_base ? i : i - le->lacl_base + 3;
   }
   return h;
 }
@@ -859,8 +864,13 @@ char *__acl_to_text(struct zos_acl_handle *acl, ssize_t *len_p) {
     }
   }
 
+  // A default handle is rendered as its kind: the formatter prefixes
+  // the entries with the default tag, so the text round-trips through
+  // acl_from_text() as a default ACL.
   ssize_t ext_len = 0;
-  char *ext = __le_acl_to_text(le, &ext_len, ACL_ACCESS, (char)0x6B);
+  char *ext = __le_acl_to_text(le, &ext_len,
+                               acl->zh_default ? (short)ACL_DIRDEF : (short)ACL_ACCESS,
+                               (char)0x6B);
   char *etext = NULL;
   if (ext != NULL) {
     etext = (char *)malloc(ext_len + 1);
@@ -878,7 +888,9 @@ char *__acl_to_text(struct zos_acl_handle *acl, ssize_t *len_p) {
     return NULL;
   }
 
-  size_t total = strlen(base) + (etext != NULL ? 1 + strlen(etext) : 0);
+  int has_base = base[0] != '\0';
+  size_t total = strlen(base)
+                 + (etext != NULL ? (has_base ? 1 : 0) + strlen(etext) : 0);
   char *mem = (char *)malloc(sizeof(struct zos_acl_obj_header) + total + 1);
   if (mem == NULL) {
     free(etext);
@@ -886,8 +898,8 @@ char *__acl_to_text(struct zos_acl_handle *acl, ssize_t *len_p) {
   }
   ((struct zos_acl_obj_header *)mem)->oh_tag = ZOS_ACL_TEXT_TAG;
   char *text = mem + sizeof(struct zos_acl_obj_header);
-  snprintf(text, total + 1, "%s%s%s", base, etext != NULL ? "," : "",
-           etext != NULL ? etext : "");
+  snprintf(text, total + 1, "%s%s%s", base,
+           etext != NULL && has_base ? "," : "", etext != NULL ? etext : "");
   free(etext);
   if (len_p != NULL)
     *len_p = (ssize_t)total;

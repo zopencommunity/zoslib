@@ -1184,21 +1184,24 @@ TEST_F(AclTest, DefaultAclSetAndInherit) {
   EXPECT_EQ(acl_free(inherited), 0);
 
   // An empty default handle removes the defaults: inheritance stops.
-  acl = acl_get_file(src_path_, ACL_TYPE_ACCESS);
-  ASSERT_NE(acl, (acl_t)NULL);
-  // build an empty default handle via from_text of base-only default
-  acl_t empty_def = acl_from_text("default:user::rwx");
-  if (empty_def != NULL) {
-    EXPECT_EQ(acl_set_file(dir, ACL_TYPE_DEFAULT, empty_def), 0);
-    acl_free(empty_def);
-    snprintf(child, sizeof(child), "%s/after", dir);
-    ASSERT_EQ(close(open(child, O_CREAT | O_WRONLY, 0644)), 0);
-    inherited = acl_get_file(child, ACL_TYPE_ACCESS);
-    ASSERT_NE(inherited, (acl_t)NULL);
-    EXPECT_EQ(aclEntryCount(inherited), 0);
-    acl_free(inherited);
-  }
-  acl_free(acl);
+  // The empty handle comes from a fresh directory — a default handle
+  // from from_text() requires default-tagged entries, and a base-only
+  // default text is rejected.
+  char fresh[64];
+  snprintf(fresh, sizeof(fresh), "/tmp/zoslib_acl_fresh_XXXXXX");
+  ASSERT_NE(mkdtemp(fresh), (char *)NULL);
+  acl_t empty_def = acl_get_file(fresh, ACL_TYPE_DEFAULT);
+  ASSERT_NE(empty_def, (acl_t)NULL);
+  EXPECT_EQ(aclEntryCount(empty_def), 0);
+  EXPECT_EQ(acl_set_file(dir, ACL_TYPE_DEFAULT, empty_def), 0);
+  acl_free(empty_def);
+  rmdir(fresh);
+  snprintf(child, sizeof(child), "%s/after", dir);
+  ASSERT_EQ(close(open(child, O_CREAT | O_WRONLY, 0644)), 0);
+  inherited = acl_get_file(child, ACL_TYPE_ACCESS);
+  ASSERT_NE(inherited, (acl_t)NULL);
+  EXPECT_EQ(aclEntryCount(inherited), 0);
+  acl_free(inherited);
 
   snprintf(child, sizeof(child), "%s/newfile", dir);
   remove(child);
@@ -1253,22 +1256,26 @@ TEST_F(AclTest, DefaultHandleRejectedByAccessSetters) {
   close(fd);
 
   // an empty default handle is rejected as well (it used to delete
-  // the destination's access ACL)
-  acl_t empty_def = acl_get_file(src_path_, ACL_TYPE_DEFAULT);
-  if (empty_def != NULL && aclEntryCount(empty_def) == 0) {
-    errno = 0;
-    EXPECT_EQ(acl_set_file(dst_path_, ACL_TYPE_ACCESS, empty_def), -1);
-    EXPECT_EQ(errno, EINVAL);
-    fd = open(dst_path_, O_RDONLY | O_NONBLOCK);
-    ASSERT_GE(fd, 0);
-    errno = 0;
-    EXPECT_EQ(acl_set_fd(fd, empty_def), -1);
-    EXPECT_EQ(errno, EINVAL);
-    close(fd);
-  }
+  // the destination's access ACL).  The handle comes from a fresh
+  // directory: a file has no default ACL.
+  char fresh[64];
+  snprintf(fresh, sizeof(fresh), "/tmp/zoslib_acl_fresh2_XXXXXX");
+  ASSERT_NE(mkdtemp(fresh), (char *)NULL);
+  acl_t empty_def = acl_get_file(fresh, ACL_TYPE_DEFAULT);
+  ASSERT_NE(empty_def, (acl_t)NULL);
+  EXPECT_EQ(aclEntryCount(empty_def), 0);
+  errno = 0;
+  EXPECT_EQ(acl_set_file(dst_path_, ACL_TYPE_ACCESS, empty_def), -1);
+  EXPECT_EQ(errno, EINVAL);
+  fd = open(dst_path_, O_RDONLY | O_NONBLOCK);
+  ASSERT_GE(fd, 0);
+  errno = 0;
+  EXPECT_EQ(acl_set_fd(fd, empty_def), -1);
+  EXPECT_EQ(errno, EINVAL);
+  close(fd);
   acl_free(d);
-  if (empty_def != NULL)
-    acl_free(empty_def);
+  acl_free(empty_def);
+  rmdir(fresh);
 
   // the destination is untouched
   struct stat st;
@@ -1286,10 +1293,38 @@ TEST_F(AclTest, ToTextDefaultHandle) {
 
   char *text = acl_to_text(d, NULL);
   ASSERT_NE(text, (char *)NULL);
+  EXPECT_NE(text[0], ',');  // no leading comma: no empty first entry
   EXPECT_EQ(strstr(text, "user::"), (char *)NULL);  // no base entries
-  EXPECT_EQ(strstr(text, "::rwx"), (char *)NULL);
+  EXPECT_NE(strstr(text, "default:"), (char *)NULL); // the kind tag
   EXPECT_NE(strstr(text, "user:"), (char *)NULL);   // the entry itself
+  // The text round-trips as a default handle.
+  acl_t back = acl_from_text(text);
   acl_free(text);
+  ASSERT_NE(back, (acl_t)NULL);
+  EXPECT_EQ(back->zh_default, 1);
+  ASSERT_EQ(aclEntryCount(back), 1);
+  EXPECT_EQ(aclEntry(back, 0)->acle_id, getuid());
+  acl_free(back);
+  acl_free(d);
+}
+
+// The entry accessors on a default handle treat the entries as
+// extended, not as the owner base entry.
+TEST_F(AclTest, DefaultHandleEntryAccessors) {
+  char dtext[128];
+  snprintf(dtext, sizeof(dtext), "default:user:%ld:rwx", (long)getuid());
+  acl_t d = acl_from_text(dtext);
+  ASSERT_NE(d, (acl_t)NULL);
+
+  acl_entry_t entry;
+  ASSERT_EQ(acl_get_entry(d, ACL_FIRST_ENTRY, &entry), 1);
+  acl_tag_t tag;
+  EXPECT_EQ(acl_get_tag_type(entry, &tag), 0);
+  EXPECT_EQ(tag, ACL_USER);  // not ACL_USER_OBJ
+  uid_t *qual = (uid_t *)acl_get_qualifier(entry);
+  ASSERT_NE(qual, (uid_t *)NULL);  // not EINVAL (a base entry would be)
+  EXPECT_EQ(*qual, getuid());
+  acl_free(qual);
   acl_free(d);
 }
 

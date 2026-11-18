@@ -1228,6 +1228,71 @@ TEST_F(AclTest, DefaultAclTextRejected) {
   EXPECT_EQ(acl_free(access_acl), 0);
 }
 
+// A default-ACL handle must not be installable as an access ACL: it
+// has no base entries, so the mode would be garbage; and its empty
+// form used to delete the destination's access ACL without the
+// narrowing and rollback safeguards.
+TEST_F(AclTest, DefaultHandleRejectedByAccessSetters) {
+  char dtext[128];
+  snprintf(dtext, sizeof(dtext), "default:user:%ld:rwx", (long)getuid());
+  acl_t d = acl_from_text(dtext);
+  ASSERT_NE(d, (acl_t)NULL);
+  EXPECT_EQ(d->zh_default, 1);
+  EXPECT_EQ(aclEntryCount(d), 1);
+
+  // by path
+  errno = 0;
+  EXPECT_EQ(acl_set_file(dst_path_, ACL_TYPE_ACCESS, d), -1);
+  EXPECT_EQ(errno, EINVAL);
+  // by descriptor
+  int fd = open(dst_path_, O_RDONLY | O_NONBLOCK);
+  ASSERT_GE(fd, 0);
+  errno = 0;
+  EXPECT_EQ(acl_set_fd(fd, d), -1);
+  EXPECT_EQ(errno, EINVAL);
+  close(fd);
+
+  // an empty default handle is rejected as well (it used to delete
+  // the destination's access ACL)
+  acl_t empty_def = acl_get_file(src_path_, ACL_TYPE_DEFAULT);
+  if (empty_def != NULL && aclEntryCount(empty_def) == 0) {
+    errno = 0;
+    EXPECT_EQ(acl_set_file(dst_path_, ACL_TYPE_ACCESS, empty_def), -1);
+    EXPECT_EQ(errno, EINVAL);
+    fd = open(dst_path_, O_RDONLY | O_NONBLOCK);
+    ASSERT_GE(fd, 0);
+    errno = 0;
+    EXPECT_EQ(acl_set_fd(fd, empty_def), -1);
+    EXPECT_EQ(errno, EINVAL);
+    close(fd);
+  }
+  acl_free(d);
+  if (empty_def != NULL)
+    acl_free(empty_def);
+
+  // the destination is untouched
+  struct stat st;
+  ASSERT_EQ(stat(dst_path_, &st), 0);
+  EXPECT_EQ(st.st_mode & 0777, (mode_t)0600);
+}
+
+// acl_to_text on a default handle renders its entries only, without
+// fabricated base entries.
+TEST_F(AclTest, ToTextDefaultHandle) {
+  char dtext[128];
+  snprintf(dtext, sizeof(dtext), "default:user:%ld:rwx", (long)getuid());
+  acl_t d = acl_from_text(dtext);
+  ASSERT_NE(d, (acl_t)NULL);
+
+  char *text = acl_to_text(d, NULL);
+  ASSERT_NE(text, (char *)NULL);
+  EXPECT_EQ(strstr(text, "user::"), (char *)NULL);  // no base entries
+  EXPECT_EQ(strstr(text, "::rwx"), (char *)NULL);
+  EXPECT_NE(strstr(text, "user:"), (char *)NULL);   // the entry itself
+  acl_free(text);
+  acl_free(d);
+}
+
 // A file that does not exist is an error.
 TEST_F(AclTest, MissingFile) {
   errno = 0;

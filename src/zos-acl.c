@@ -640,10 +640,13 @@ int __acl_set_file(const char *path_p, short type, struct zos_acl_handle *acl) {
     return rc;
   }
 
+  if (le->lacl_base != 3) {
+    errno = EINVAL; // not an access-ACL handle (e.g. a default handle)
+    return -1;
+  }
+
   struct ACL *hdr = &le->lacl_data.aclb_entry;
   int empty = hdr->acl_entnum <= 0;
-  if (empty && le->lacl_base != 3)
-    return __acl_delete_file_le(epath, ACL_ACCESS);
 
   // O_NONBLOCK keeps the open from blocking on a FIFO, O_NOCTTY keeps
   // a terminal destination from becoming the controlling terminal,
@@ -702,11 +705,12 @@ int __acl_set_fd(int fd, struct zos_acl_handle *acl) {
   lacl_t le = acl->zh_le;
 
   // The descriptor belongs to the caller and is not closed.
-  if (le->lacl_data.aclb_entry.acl_entnum <= 0) {
-    if (le->lacl_base != 3)
-      return __acl_delete_fd_le(fd, ACL_ACCESS);
-    return zos_acl_set_empty_fd(fd, le);
+  if (le->lacl_base != 3) {
+    errno = EINVAL; // not an access-ACL handle (e.g. a default handle)
+    return -1;
   }
+  if (le->lacl_data.aclb_entry.acl_entnum <= 0)
+    return zos_acl_set_empty_fd(fd, le);
   return zos_acl_set_nonempty_fd(fd, le);
 }
 
@@ -844,6 +848,7 @@ char *__acl_to_text(struct zos_acl_handle *acl, ssize_t *len_p) {
   // entries — LE rejects them — and renders its entries only.
   char base[64];
   int off = 0;
+  base[0] = '\0'; // a default handle has no base entries to render
   if (!acl->zh_default) {
     static const char *names[3] = {"user", "group", "other"};
     for (int i = 0; i < 3; i++) {

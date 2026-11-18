@@ -646,7 +646,9 @@ static int zos_acl_set_nonempty_fd(int fd, lacl_t acl) {
   {
     if (saved != NULL)
       __acl_free_le(saved);
-    close(fd);
+    // The descriptor belongs to the caller: acl_set_fd() must not
+    // close it, and acl_set_file() closes it after this returns —
+    // closing here would double-close.
     return -1;
   }
   int rc = __acl_set_fd_le(fd, ACL_ACCESS, set_copy, ACL_ADD, NULL);

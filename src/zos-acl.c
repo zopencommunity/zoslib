@@ -113,6 +113,31 @@ static struct zos_acl_handle *zos_acl_publish(lacl_t le) {
   return zos_acl_publish_as(le, 0);
 }
 
+// Deep-copies LE working storage for use as a private buffer in set
+// requests: LE's acl_set_fd() may reorder the entries of the buffer
+// it is given, and a published handle must never be written to.  The
+// base entries are copied as well.  Returns NULL on allocation
+// failure.
+static lacl_t zos_acl_le_copy(lacl_t le) {
+  int n = le->lacl_base + le->lacl_data.aclb_entry.acl_entnum;
+  lacl_t copy = __acl_init_le(n < 1 ? 1 : n);
+  if (copy == NULL)
+    return NULL;
+  copy->lacl_base = le->lacl_base;
+  memcpy(copy->lacl_base_entry, le->lacl_base_entry,
+         sizeof(le->lacl_base_entry));
+  copy->lacl_data.aclb_entry.acl_entnum =
+      le->lacl_data.aclb_entry.acl_entnum;
+  copy->lacl_data.aclb_entry.acl_elen = le->lacl_data.aclb_entry.acl_elen;
+  copy->lacl_data.aclb_entry.acl_len = le->lacl_data.aclb_entry.acl_len;
+  int nentries = le->lacl_data.aclb_entry.acl_entnum;
+  if (nentries > 0)
+    memcpy((char *)&copy->lacl_data + sizeof(struct ACL_buf),
+           (char *)&le->lacl_data + sizeof(struct ACL_buf),
+           (size_t)nentries * sizeof(struct ACL_entry));
+  return copy;
+}
+
 // Do two default-ACL working storages carry the same entries?  (A
 // default ACL has no base entries, only extended ones.)
 static int default_acls_equal(lacl_t a, lacl_t b) {
@@ -616,7 +641,16 @@ static int zos_acl_set_nonempty_fd(int fd, lacl_t acl) {
     }
   }
 
-  int rc = __acl_set_fd_le(fd, ACL_ACCESS, acl, ACL_ADD, NULL);
+  lacl_t set_copy = zos_acl_le_copy(acl);
+  if (set_copy == NULL)
+  {
+    if (saved != NULL)
+      __acl_free_le(saved);
+    close(fd);
+    return -1;
+  }
+  int rc = __acl_set_fd_le(fd, ACL_ACCESS, set_copy, ACL_ADD, NULL);
+  __acl_free_le(set_copy);
   if (rc == 0 && special != 0) {
     mode_t base = 0;
     for (int i = 0; i < 3; i++)
@@ -632,8 +666,13 @@ static int zos_acl_set_nonempty_fd(int fd, lacl_t acl) {
       // place when the narrowing fails.
       int save_errno = errno;
       if (saved != NULL) {
-        if (__acl_set_fd_le(fd, ACL_ACCESS, saved, ACL_ADD, NULL) == 0)
-          fchmod(fd, fst.st_mode & 07777);
+        lacl_t saved_copy = zos_acl_le_copy(saved);
+        if (saved_copy != NULL)
+        {
+          if (__acl_set_fd_le(fd, ACL_ACCESS, saved_copy, ACL_ADD, NULL) == 0)
+            fchmod(fd, fst.st_mode & 07777);
+          __acl_free_le(saved_copy);
+        }
       } else {
         if (fchmod(fd, fst.st_mode & 07777) == 0)
           __acl_delete_fd_le(fd, ACL_ACCESS);
@@ -700,9 +739,16 @@ int __acl_set_file(const char *path_p, short type, struct zos_acl_handle *acl) {
       if (rc == 0 && type == ACL_DIRDEF)
         rc = __acl_delete_fd_le(fd, ACL_DIRDEF);
     } else {
-      rc = __acl_set_fd_le(fd, ACL_FILDEF, le, ACL_ADD, NULL);
+      lacl_t set_copy = zos_acl_le_copy(le);
+      if (set_copy == NULL)
+      {
+        close(fd);
+        return -1;
+      }
+      rc = __acl_set_fd_le(fd, ACL_FILDEF, set_copy, ACL_ADD, NULL);
       if (rc == 0 && type == ACL_DIRDEF)
-        rc = __acl_set_fd_le(fd, ACL_DIRDEF, le, ACL_ADD, NULL);
+        rc = __acl_set_fd_le(fd, ACL_DIRDEF, set_copy, ACL_ADD, NULL);
+      __acl_free_le(set_copy);
     }
     close(fd);
     return rc;

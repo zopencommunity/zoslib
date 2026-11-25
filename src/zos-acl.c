@@ -64,7 +64,7 @@ extern int __le_acl_from_text(const char *buf_p, short op_type, acl_all_t set_pt
 extern char *__le_acl_to_text(const lacl_t acl_d, ssize_t *len_p, short type_d,
                               char delim) asm("@@LTTEXT");
 
-// Every object released through acl_free() — a handle or a qualifier —
+// Every object released through acl_free() - a handle or a qualifier -
 // carries this header in front of the pointer the caller holds, so
 // that acl_free() can tell them apart.  The size_t keeps the payload
 // aligned.
@@ -227,7 +227,7 @@ struct zos_acl_handle *__acl_get_file(const char *path_p, short type) {
 
   if (type == ACL_DIRDEF || type == ACL_FILDEF) {
     // The default ACL of a directory.  A directory without one yields
-    // a handle without entries — Linux behaves the same way, and
+    // a handle without entries - Linux behaves the same way, and
     // gnulib's copy-acl relies on it: the empty handle is trivial and
     // routes to acl_delete_def_file() on the destination.  z/OS has
     // two default ACL types: the handle carries the file default when
@@ -276,7 +276,7 @@ struct zos_acl_handle *__acl_get_file(const char *path_p, short type) {
 
     // A POSIX default ACL is one template; z/OS has two (for files and
     // directories created inside).  One handle cannot represent two
-    // different templates — refuse the lossy round-trip.
+    // different templates - refuse the lossy round-trip.
     if (stored[0] != NULL && stored[1] != NULL
         && !default_acls_equal(stored[0], stored[1]))
     {
@@ -606,7 +606,7 @@ static int zos_acl_set_nonempty_fd(int fd, lacl_t acl) {
   // non-owners could be modified by them while the privilege bits are
   // cleared, and the restoration would make their content privileged;
   // the destination's own mode counts as well, because a non-owner may
-  // hold a descriptor opened for writing before the update — write
+  // hold a descriptor opened for writing before the update - write
   // access is checked at open time only.  Refuse all of these.
   if (((special & S_ISVTX) != 0 && S_ISDIR(fst.st_mode) &&
        zos_acl_grants(acl, fst.st_uid, 03)) ||
@@ -647,7 +647,7 @@ static int zos_acl_set_nonempty_fd(int fd, lacl_t acl) {
     if (saved != NULL)
       __acl_free_le(saved);
     // The descriptor belongs to the caller: acl_set_fd() must not
-    // close it, and acl_set_file() closes it after this returns —
+    // close it, and acl_set_file() closes it after this returns -
     // closing here would double-close.
     return -1;
   }
@@ -664,7 +664,7 @@ static int zos_acl_set_nonempty_fd(int fd, lacl_t acl) {
       // carry the old rwx bits, so restoring them keeps the mode
       // narrow; without saved entries the mode is narrowed first,
       // because the incoming entries may be the only thing denying
-      // access that the incoming base permissions grant — leave them in
+      // access that the incoming base permissions grant - leave them in
       // place when the narrowing fails.
       int save_errno = errno;
       if (saved != NULL) {
@@ -707,7 +707,7 @@ int __acl_set_file(const char *path_p, short type, struct zos_acl_handle *acl) {
 
   if (type == ACL_DIRDEF || type == ACL_FILDEF) {
     // Setting the default ACL of a directory: no mode, no special
-    // bits, none of the access-ACL machinery — just the LE requests,
+    // bits, none of the access-ACL machinery - just the LE requests,
     // pinned to the directory inode so a concurrent rename cannot
     // update different directories' defaults.  An empty handle removes
     // the defaults; a handle with entries is stored as both the file
@@ -941,7 +941,7 @@ struct zos_acl_handle *__acl_from_text(const char *buf_p) {
   lacl_t acl = set.acls_data[0];
   // Validate before the handle is published: text without the three
   // base entries parses (acl_valid() does not require them), but the
-  // update paths read the base entries for the mode — reject it.
+  // update paths read the base entries for the mode - reject it.
   if (acl->lacl_base != 3 || __acl_valid_le(acl, NULL) != 0) {
     __acl_free_le(acl);
     errno = EINVAL;
@@ -961,7 +961,7 @@ char *__acl_to_text(struct zos_acl_handle *acl, ssize_t *len_p) {
   // NULL for a handle without any); the base entries are rendered here
   // so that the text form carries the whole ACL and round-trips
   // through acl_from_text().  A default-ACL handle has no base
-  // entries — LE rejects them — and renders its entries only.
+  // entries - LE rejects them - and renders its entries only.
   char base[64];
   int off = 0;
   base[0] = '\0'; // a default handle has no base entries to render

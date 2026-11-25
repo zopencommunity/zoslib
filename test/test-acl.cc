@@ -720,7 +720,7 @@ TEST_F(AclTest, SetuidWithWritableIncomingBaseIsRefused) {
 }
 
 // The empty-handle variant: an old mode granting write to group or
-// other on a setuid destination is refused as well — a descriptor
+// other on a setuid destination is refused as well - a descriptor
 // opened for writing before the update keeps write access.
 TEST_F(AclTest, SetuidWithWritableModeEmptyHandleIsRefused) {
   ASSERT_EQ(chmod(dst_path_, 04777), 0);
@@ -1151,7 +1151,7 @@ TEST_F(AclTest, DefaultAclGet) {
 }
 
 // from_text with default: tags yields a default handle; setting it on
-// a directory stores a default ACL, verified through inheritance —
+// a directory stores a default ACL, verified through inheritance -
 // the ground truth, since getfacl does not display stored defaults.
 TEST_F(AclTest, DefaultAclSetAndInherit) {
   char dir[64], child[80];
@@ -1184,7 +1184,7 @@ TEST_F(AclTest, DefaultAclSetAndInherit) {
   EXPECT_EQ(acl_free(inherited), 0);
 
   // An empty default handle removes the defaults: inheritance stops.
-  // The empty handle comes from a fresh directory — a default handle
+  // The empty handle comes from a fresh directory - a default handle
   // from from_text() requires default-tagged entries, and a base-only
   // default text is rejected.
   char fresh[64];

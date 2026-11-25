@@ -12,8 +12,8 @@
 // POSIX names are bound to them at compile time through the __asm()
 // labels in <sys/acl.h>, which requires including that header with the
 // override macro defined.  Link-time symbol searches that compile
-// nothing — autoconf's AC_CHECK_FUNCS() and AC_SEARCH_LIBS() declare
-// the function themselves and only link — cannot see them, so
+// nothing - autoconf's AC_CHECK_FUNCS() and AC_SEARCH_LIBS() declare
+// the function themselves and only link - cannot see them, so
 // configure concludes that the platform has no ACL support.
 //
 // These aliases give the POSIX names a link-time presence, like the

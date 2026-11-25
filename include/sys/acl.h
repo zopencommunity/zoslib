@@ -96,7 +96,7 @@
 
 // The system header typedefs acl_entry_t as "struct ACL_entry *"; the
 // POSIX entry API needs descriptors that know their position in the
-// ACL.  A typedef cannot be redefined — shadow it with a macro.
+// ACL.  A typedef cannot be redefined - shadow it with a macro.
 #define acl_entry_t zos_acl_entry_t
 
 // Permission bits for the permset API, matching the rwx octal digit of
@@ -277,7 +277,7 @@ __Z_EXPORT extern int acl_set_fd(int fd, acl_t acl)
  * and "type:id:perm" for extended entries, e.g.
  * "user::rw-,group::r--,other::r--,user:123:rwx".  Permissions are
  * rwx, '-' or an octal digit; ids are uid/gid numbers or user names.
- * The text form carries a single access ACL, or — as an extension —
+ * The text form carries a single access ACL, or - as an extension -
  * entries tagged default: or fdefault:, yielding a default-ACL
  * handle for acl_set_file(path, ACL_TYPE_DEFAULT, ...).  Mixing
  * access and default entries is rejected.  The resulting handle is validated: text without the

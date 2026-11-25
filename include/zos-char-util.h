@@ -70,6 +70,16 @@ __Z_EXPORT int __guess_ue(const void *src, size_t size, char *errmsg,
 __Z_EXPORT int __guess_ae(const void *src, size_t size);
 
 /**
+ * Set the number of bytes scanned by the CCSID guess heuristics
+ * (default: 4096). Runtime equivalent of the __CCSIDGUESSBUFSIZE
+ * environment variable; affects both __guess_fd_ue and the untagged-file
+ * read heuristic used by the zoslib open()/fopen() hooks. Nonpositive
+ * values are normalized to the default of 4096.
+ * \param [in] nbytes - number of bytes to scan.
+ */
+__Z_EXPORT void __set_ccsid_guess_buf_size(int nbytes);
+
+/**
  * Convert string from UTF8 to UTF16
  */
 __Z_EXPORT int conv_utf8_utf16(char *, size_t, const char *, size_t);

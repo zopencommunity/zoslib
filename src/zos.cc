@@ -916,6 +916,14 @@ static notagread_t get_no_tag_read_behaviour(const char *envar) {
     return __NO_TAG_READ_V6;
   } else if (ntr && !strcmp(ntr, "STRICT")) {
     return __NO_TAG_READ_STRICT;
+  } else if (ntr && *ntr) {
+#if defined(ZOSLIB_GENERIC)
+    __dprintf(2, "Warning: unrecognized %s value \"%s\", "
+                 "valid values: AUTO, WARN, ASCII, STRICT\n", envar, ntr);
+#else
+    __dprintf(2, "Warning: unrecognized %s value \"%s\", "
+                 "valid values: AUTO, WARN, V6, STRICT\n", envar, ntr);
+#endif
   }
   return __NO_TAG_READ_DEFAULT; // default
 }
@@ -2718,8 +2726,36 @@ int __zinit::initialize(const zoslib_config_t &aconfig) {
   std::string ccsid;
   if (get_env_var("__STDIN_CCSID", ccsid))
     __set_autocvt_on_fd_stream(STDIN_FILENO, std::stoul(ccsid), 1, false);
-  else
-    __set_autocvt_on_fd_stream(STDIN_FILENO, 1047, 1, true);
+  else {
+    /*
+     * Historically, untagged stdin was blindly tagged as EBCDIC (1047),
+     * which mangles input when an untagged ASCII file is redirected into
+     * the program (e.g. `jq < file`). Pipes are tagged 819 by the pipe
+     * hook and ttys are skipped by the on_untagged_only path, so the
+     * blind assumption effectively only fires for redirected files.
+     * For a seekable untagged regular file, apply the untagged-file
+     * content heuristic instead: tag stdin according to what the data
+     * actually looks like.
+     */
+    struct stat st;
+    int stdin_is_untagged_file =
+        fstat(STDIN_FILENO, &st) == 0 && S_ISREG(st.st_mode) &&
+        st.st_tag.ft_txtflag == 0 && st.st_tag.ft_ccsid == 0 &&
+        lseek(STDIN_FILENO, 0, SEEK_CUR) != (off_t)-1;
+    if (stdin_is_untagged_file) {
+      /*
+       * The probe uses positional reads and never changes the file
+       * offset, so partially consumed stdin and open-file descriptions
+       * shared with concurrent readers are unaffected.
+       */
+      if (__file_needs_conversion_init(NULL, STDIN_FILENO))
+        __set_autocvt_on_fd_stream(STDIN_FILENO, 1047, 1, false);
+      else
+        __set_autocvt_on_fd_stream(STDIN_FILENO, 819, 1, false);
+    } else {
+      __set_autocvt_on_fd_stream(STDIN_FILENO, 1047, 1, true);
+    }
+  }
 
   if (get_env_var("__STDOUT_CCSID", ccsid))
     __set_autocvt_on_fd_stream(STDOUT_FILENO, std::stoul(ccsid), 1, false);

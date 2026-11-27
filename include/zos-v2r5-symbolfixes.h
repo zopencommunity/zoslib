@@ -8,11 +8,12 @@
 #ifndef ZOS_V2R5_SYMBOLFIXES_H
 #define ZOS_V2R5_SYMBOLFIXES_H
 
-/* NOTE: this header is force-included by zoslib.pc before the consumer's
- * source text, so it must not include <features.h>: that would lock in
- * the feature set before a consumer can define _POSIX_C_SOURCE or
- * _XPLATFORM_SOURCE.  The checks below therefore rely on the command-line
- * feature macros and the compiler-predefined __TARGET_LIB__. */
+/* NOTE: zopen consumers force-include this header through
+ * ZOPEN_EXTRA_CFLAGS/CXXFLAGS (-include / -qinclude), i.e. before the
+ * consumer's source text.  Do not include <features.h> here: that would
+ * lock in the feature set before a consumer can define _POSIX_C_SOURCE
+ * or _XPLATFORM_SOURCE.  The checks below use the command-line feature
+ * macros and the compiler-predefined __TARGET_LIB__. */
 
 // Redefines V2R5+ symbols with _undefined suffix to trigger a linker 
 // error so they are not detected by autotools-based configure scripts. 

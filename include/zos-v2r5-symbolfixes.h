@@ -10,10 +10,12 @@
 
 // Redefines V2R5+ symbols with _undefined suffix to trigger a linker 
 // error so they are not detected by autotools-based configure scripts. 
+// The system headers only provide these symbols for V2R5 targets when
+// _POSIX_C_SOURCE >= 200809L or _XPLATFORM_SOURCE is set; in every other
+// case the symbols must not be visible to consumers.
 #if (__TARGET_LIB__ < 0x42050000) || \
     (__TARGET_LIB__ >= 0x42050000 && \
-    (((_POSIX_C_SOURCE + 0) < 200809L) && !defined(_XPLATFORM_SOURCE) && \
-     !defined(__XPLAT) && !defined(__SUSV4_POSIX)))
+    (((_POSIX_C_SOURCE + 0) < 200809L) && !defined(_XPLATFORM_SOURCE)))
 #pragma redefine_extname readlinkat readlinkat_undefined
 #pragma redefine_extname openat openat_undefined
 #pragma redefine_extname linkat linkat_undefined

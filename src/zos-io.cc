@@ -1130,7 +1130,6 @@ int __pthread_create_extended(pthread_t *thread, const pthread_attr_t *attr,
   return __pthread_create_orig(thread, attr, custom_start_routine, (void *)threadArg);
 }
 
-#if !defined(__SUSV4_POSIX)
 ssize_t getdelim(char **lineptr, size_t *n, int delimiter, FILE *fp) {
   ssize_t result = 0;
   size_t cur_len = 0;
@@ -1193,6 +1192,7 @@ ssize_t getdelim(char **lineptr, size_t *n, int delimiter, FILE *fp) {
   return result;
 }
 
+#if !defined(__SUSV4_POSIX)
 ssize_t getline(char **lineptr, size_t *n, FILE *stream) {
   return getdelim(lineptr, n, '\n', stream);
 }

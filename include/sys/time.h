@@ -22,14 +22,25 @@ extern "C" {
  * \param [in] tv timeval structure containing new time
  * \return return 0 for success, or -1 for failure.
  */
-__Z_EXPORT int futimes(int fd, const struct timeval tv[2]);
 /**
  * Changes the access and modification times of a file
  * \param [in] filename file path to modify
  * \param [in] tv timeval structure containing new time
  * \return return 0 for success, or -1 for failure.
  */
+/* The system's <sys/time.h> declares futimes()/lutimes() only when both
+ * __XPLAT and __UU are defined.  With ZOSLIB_ENABLE_V2R5_FEATURES zoslib
+ * resolves the functions from the LE vector table at startup and exposes
+ * function pointers instead. */
+#if defined(ZOSLIB_ENABLE_V2R5_FEATURES)
+#if !(defined(__XPLAT) && defined(__UU))
+__Z_EXPORT extern int (*futimes)(int fd, const struct timeval tv[2]);
+__Z_EXPORT extern int (*lutimes)(const char *filename, const struct timeval tv[2]);
+#endif
+#elif !(defined(__XPLAT) && defined(__UU))
+__Z_EXPORT int futimes(int fd, const struct timeval tv[2]);
 __Z_EXPORT int lutimes(const char *filename, const struct timeval tv[2]);
+#endif
 #if defined(__cplusplus)
 }
 #endif

@@ -75,9 +75,10 @@ int (*getentropy)(void *, size_t) = 0;
 int (*futimes)(int fd, const struct timeval tv[2]) = 0;
 int (*lutimes)(const char *filename, const struct timeval tv[2]) = 0;
 #endif
-/* clock_gettime and nanosleep are gated by __RT in system headers, not
- * __XPLAT, so they are independent of _XPLATFORM_SOURCE. */
-#if defined(ZOSLIB_ENABLE_V2R5_FEATURES)
+/* clock_gettime and nanosleep are provided by the system for V2R5
+ * targets when __RT is defined. */
+#if defined(ZOSLIB_ENABLE_V2R5_FEATURES) && \
+    !(defined(__RT) && (__EDC_TARGET >= 0x42050000))
 int (*clock_gettime)(clockid_t cld_id, struct timespec * tp) = 0;
 int (*nanosleep)(const struct timespec*, struct timespec*) = 0;
 #endif
@@ -2903,6 +2904,9 @@ int __pipe2(int pipefd[2], int flags) {
 }
 #endif
 
+/* Provide a fallback only when the system does not declare/define them. */
+#if defined(ZOSLIB_ENABLE_V2R5_FEATURES) || \
+    !(defined(__XPLAT) && defined(__UU))
 #if defined(ZOSLIB_ENABLE_V2R5_FEATURES)
 int __futimes(int fd, const struct timeval tv[2]) {
 #else
@@ -2964,6 +2968,7 @@ int lutimes(const char *filename, const struct timeval tv[2]) {
 
   return 0;
 }
+#endif /* ZOSLIB_ENABLE_V2R5_FEATURES || !(__XPLAT && __UU) */
 
 #if defined(ZOSLIB_ENABLE_V2R5_FEATURES)
 extern "C" int __nanosleep(const struct timespec *req, struct timespec *rem) {
@@ -3046,9 +3051,10 @@ void __zinit::populateLEFunctionPointers() {
     lutimes = __lutimes;
   }
 #endif
-#if defined(ZOSLIB_ENABLE_V2R5_FEATURES)
-  /* clock_gettime and nanosleep are gated by __RT in system headers,
-   * not __XPLAT, so initialise them independently. */
+#if defined(ZOSLIB_ENABLE_V2R5_FEATURES) && \
+    !(defined(__RT) && (__EDC_TARGET >= 0x42050000))
+  /* clock_gettime and nanosleep are provided by the system for V2R5
+   * targets when __RT is defined. */
   if (__is_os_level_at_or_above(ZOSLVL_V2R5)) {
     char ppa_funcname[PPA_FUNC_LENGTH] = {0};
     MAP_LE_FUNC_ELSE_ZOSLIB_FUNC(nanosleep, __nanosleep, "nanosleep", 0xE22);

@@ -40,9 +40,11 @@ extern "C" {
 __Z_EXPORT extern FILE *fopen(const char *filename, const char *mode) __asm("__fopen_ascii");
 #if !defined(__SUSV4_POSIX)
 __Z_EXPORT ssize_t getline(char **lineptr, size_t *n, FILE *stream);
-__Z_EXPORT ssize_t getdelim(char **lineptr, size_t *n, int delimiter, FILE *stream);
 __Z_EXPORT int dprintf(int fd, const char *, ...);
 #endif
+/* The z/OS headers provide getline() and dprintf() for __SUSV4_POSIX,
+ * but not getdelim(), so zoslib always supplies getdelim(). */
+__Z_EXPORT ssize_t getdelim(char **lineptr, size_t *n, int delimiter, FILE *stream);
 #if !defined(__XPLAT)
 __Z_EXPORT int vasprintf(char **strp, const char *fmt, va_list ap);
 __Z_EXPORT int asprintf(char **strp, const char *fmt, ...);

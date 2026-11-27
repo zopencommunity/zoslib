@@ -97,10 +97,9 @@
 #pragma redefine_extname poxis_memalign posix_memalign_undefined
 #endif
 
-//TODO: remove this when LE's fdopendir is fixed
-#if !defined(__SUSV4_POSIX)
+// LE's fdopendir is still broken, even when it is declared for
+// __SUSV4_POSIX; keep forcing a link error until the LE defect is fixed.
 #pragma redefine_extname fdopendir fdopendir_undefined
-#endif
 #pragma redefine_extname memfd_create memfd_create_undefined
 
 #endif // ZOS_V2R5_SYMBOLFIXES_H

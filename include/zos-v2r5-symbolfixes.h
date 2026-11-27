@@ -8,10 +8,11 @@
 #ifndef ZOS_V2R5_SYMBOLFIXES_H
 #define ZOS_V2R5_SYMBOLFIXES_H
 
-/* This header is force-included by zoslib.pc before any other header, so
- * pull in <features.h> to make __TARGET_LIB__, _POSIX_C_SOURCE and the
- * derived __SUSV4_POSIX/__XPLAT macros available here. */
-#include <features.h>
+/* NOTE: this header is force-included by zoslib.pc before the consumer's
+ * source text, so it must not include <features.h>: that would lock in
+ * the feature set before a consumer can define _POSIX_C_SOURCE or
+ * _XPLATFORM_SOURCE.  The checks below therefore rely on the command-line
+ * feature macros and the compiler-predefined __TARGET_LIB__. */
 
 // Redefines V2R5+ symbols with _undefined suffix to trigger a linker 
 // error so they are not detected by autotools-based configure scripts. 

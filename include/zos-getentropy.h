@@ -1,15 +1,15 @@
 #ifndef __ZOS_GET_ENTROPY_H_
 #define __ZOS_GET_ENTROPY_H_
 
-/* __XPLAT, __TARGET_LIB__ and _POSIX_C_SOURCE are evaluated by
- * <features.h>; make sure they are initialized regardless of include order. */
+/* __XPLAT is defined by <features.h>; include it before testing it so the
+ * result does not depend on whether a system header was included first. */
 #include <features.h>
 
-#if !defined(__XPLAT) && \
-    (((__TARGET_LIB__ < 0x42050000) || \
-    (__TARGET_LIB__ >= 0x42050000 && \
-    (((_POSIX_C_SOURCE + 0) < 200809L) && !defined(_XPLATFORM_SOURCE)))) || \
-    defined(ZOSLIB_ENABLE_V2R5_FEATURES))
+/* The system's <unistd.h> declares getentropy() only when __XPLAT is
+ * defined.  Whenever __XPLAT is absent zoslib must supply it, regardless
+ * of target level or _POSIX_C_SOURCE.  This also matches the guards in
+ * src/zos-getentropy.cc. */
+#if !defined(__XPLAT)
 #include "zos-macros.h"
 #include <sys/types.h>
 
@@ -34,4 +34,4 @@ __Z_EXPORT int getentropy(void* buffer, size_t length);
 #endif
 
 #endif // __ZOS_GET_ENTROPY_H_
-#endif // !__XPLAT && (__TARGET_LIB__ condition || ZOSLIB_ENABLE_V2R5_FEATURES)
+#endif // !__XPLAT

@@ -1,6 +1,10 @@
 #ifndef __ZOS_GET_ENTROPY_H_
 #define __ZOS_GET_ENTROPY_H_
 
+/* __XPLAT, __TARGET_LIB__ and _POSIX_C_SOURCE are evaluated by
+ * <features.h>; make sure they are initialized regardless of include order. */
+#include <features.h>
+
 #if !defined(__XPLAT) && \
     (((__TARGET_LIB__ < 0x42050000) || \
     (__TARGET_LIB__ >= 0x42050000 && \

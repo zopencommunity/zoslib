@@ -10,6 +10,9 @@
 #define ZOS_SYSFILE_H_
 
 #include "zos-macros.h"
+/* __XPLAT is defined by <features.h>; include it before testing it so the
+ * result does not depend on whether a system header was included first. */
+#include <features.h>
 
 /* zoslib provides flock when the system does not.  The system's
  * <sys/file.h> provides flock only when __EDC_TARGET >= __EDC_LE4205 and

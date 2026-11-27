@@ -10,10 +10,17 @@
 #define ZOS_SYSFILE_H_
 
 #include "zos-macros.h"
+/* __XPLAT is defined by <features.h>; include it before testing it so the
+ * result does not depend on whether a system header was included first. */
+#include <features.h>
 
-#if (__TARGET_LIB__ < 0x42050000) || \
-    (__TARGET_LIB__ >= 0x42050000 && \
-    (((_POSIX_C_SOURCE + 0) < 200809L) && !defined(_XPLATFORM_SOURCE)))
+/* zoslib provides flock when the system does not.  The system's
+ * <sys/file.h> provides flock only when __EDC_TARGET >= __EDC_LE4205 and
+ * __XPLAT is defined, so zoslib's fallback is needed whenever __XPLAT is
+ * not defined.  __XPLAT can only be defined by <features.h> for V2R5
+ * targets, which means __XPLAT alone is the exact complement of the
+ * system's condition. */
+#if !defined(__XPLAT)
 #include <sys/file.h>
 
 #define   LOCK_SH  0x01    // shared file lock

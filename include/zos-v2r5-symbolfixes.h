@@ -8,8 +8,18 @@
 #ifndef ZOS_V2R5_SYMBOLFIXES_H
 #define ZOS_V2R5_SYMBOLFIXES_H
 
+/* NOTE: zopen consumers force-include this header through
+ * ZOPEN_EXTRA_CFLAGS/CXXFLAGS (-include / -qinclude), i.e. before the
+ * consumer's source text.  Do not include <features.h> here: that would
+ * lock in the feature set before a consumer can define _POSIX_C_SOURCE
+ * or _XPLATFORM_SOURCE.  The checks below use the command-line feature
+ * macros and the compiler-predefined __TARGET_LIB__. */
+
 // Redefines V2R5+ symbols with _undefined suffix to trigger a linker 
 // error so they are not detected by autotools-based configure scripts. 
+// The system headers only provide these symbols for V2R5 targets when
+// _POSIX_C_SOURCE >= 200809L or _XPLATFORM_SOURCE is set; in every other
+// case the symbols must not be visible to consumers.
 #if (__TARGET_LIB__ < 0x42050000) || \
     (__TARGET_LIB__ >= 0x42050000 && \
     (((_POSIX_C_SOURCE + 0) < 200809L) && !defined(_XPLATFORM_SOURCE)))
@@ -94,7 +104,8 @@
 #pragma redefine_extname poxis_memalign posix_memalign_undefined
 #endif
 
-//TODO: remove this when LE's fdopendir is fixed
+// LE's fdopendir is still broken, even when it is declared for
+// __SUSV4_POSIX; keep forcing a link error until the LE defect is fixed.
 #pragma redefine_extname fdopendir fdopendir_undefined
 #pragma redefine_extname memfd_create memfd_create_undefined
 

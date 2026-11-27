@@ -1192,9 +1192,11 @@ ssize_t getdelim(char **lineptr, size_t *n, int delimiter, FILE *fp) {
   return result;
 }
 
+#if !defined(__SUSV4_POSIX)
 ssize_t getline(char **lineptr, size_t *n, FILE *stream) {
   return getdelim(lineptr, n, '\n', stream);
 }
+#endif /* !__SUSV4_POSIX */
 
 // Adapted from Musl C (MIT license)
 void __randname(char *tmpl) {
@@ -1235,6 +1237,7 @@ int mkostemp(char *tmpl, int flags) {
 }
 
 // Adapted from Musl C (MIT License)
+#if !defined(__XPLAT)
 int vasprintf(char **s, const char *fmt, va_list ap) {
 	va_list ap2;
 	va_copy(ap2, ap);
@@ -1254,7 +1257,9 @@ int asprintf(char **s, const char *fmt, ...)
 	va_end(ap);
 	return ret;
 }
+#endif /* !__XPLAT */
 
+#if !defined(__SUSV4_POSIX)
 int dprintf(int fd, const char *format, ...) {
   va_list args;
   char *buffer;
@@ -1292,6 +1297,7 @@ int dprintf(int fd, const char *format, ...) {
 
   return written;
 }
+#endif /* !__SUSV4_POSIX */
 
 static ssize_t ebcdic_writev(int fd, const struct iovec *iov, int iovcnt) {
   size_t total_len = 0;

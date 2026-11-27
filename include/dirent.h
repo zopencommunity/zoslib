@@ -14,16 +14,17 @@
 #include <features.h>
 
 
-#if defined(ZOSLIB_OVERRIDE_CLIB) || defined(ZOSLIB_OVERRIDE_CLIB_DIRENT)
-/* Modify function names in header to avoid conflict with new prototypes 
-TODO: remove this when LE's fdopendir is fixed */
+#if (defined(ZOSLIB_OVERRIDE_CLIB) || defined(ZOSLIB_OVERRIDE_CLIB_DIRENT))
+/* LE's fdopendir is still broken, even when it is declared for
+ * __SUSV4_POSIX.  Keep hiding it and keep the _undefined rename active
+ * until the LE defect is fixed. */
 
 #undef fdopendir
 #define fdopendir __fdopendir_replaced
 #endif
 #include_next <dirent.h>
 
-#if defined(ZOSLIB_OVERRIDE_CLIB) || defined(ZOSLIB_OVERRIDE_CLIB_DIRENT)
+#if (defined(ZOSLIB_OVERRIDE_CLIB) || defined(ZOSLIB_OVERRIDE_CLIB_DIRENT))
 
 #undef fdopendir 
 
